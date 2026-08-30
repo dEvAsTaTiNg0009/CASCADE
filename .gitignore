@@ -1,0 +1,14 @@
+# Binaries and build artifacts
+cascade_test
+cascade_bench
+cascade_asan
+cascade_tsan
+test_asan
+test_tsan
+*.o
+*.dSYM/
+*.exe
+nul
+
+# OS artifacts
+.DS_Store
