@@ -3,12 +3,17 @@ cascade_test
 cascade_bench
 cascade_asan
 cascade_tsan
+scale_bench
 test_asan
 test_tsan
 *.o
 *.dSYM/
 *.exe
 nul
+
+# Data directories
+data/
+data*/
 
 # OS artifacts
 .DS_Store

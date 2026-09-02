@@ -1,8 +1,8 @@
-#include <memory>
-#include <mutex>
 #pragma once
 // =============================================================================
 // bloom.h — Blocked Bloom Filter (cache-line aligned, 64-byte blocks)
+#include <memory>
+#include <mutex>
 //
 // Each block = 64 bytes = 512 bits.
 // A probe maps key to ONE block (single cache-line load) then sets/checks k bits.
@@ -27,10 +27,13 @@ public:
     void rebuild(int new_total_bits);  // structural reallocation
     void clear();
 
-    int  totalBits()   const { return (int)blocks_.size() * BLOCK_BITS; }
+    int  totalBits()   const { return (int)blocks_.size() * 8; }
     int  numHashes()   const { return k_; }
     int  numElements() const { return n_; }
     double fpr()       const; // theoretical FPR = (1 - e^(-k*n/m))^k
+
+    std::vector<uint8_t> serialize() const;
+    static BlockedBloomFilter deserialize(const uint8_t* data, size_t size);
 
 private:
     int                       k_;    // number of hash functions
@@ -81,20 +84,43 @@ struct SStableAccessTracker {
 
 // ---------------------------------------------------------------------------
 // Dual-trigger adaptive allocation across all levels
+//
+// Structural trigger (reallocateStructural):
+//   Each level i gets: max(512, bits_per_key * |L_i| * depth_mult_i) bits
+//   depth_mult_i = 1 + 0.1*i  (Monkey-style: deeper levels earn more bits/key)
+//   Capped to bloom_max_bytes total (safety valve).
+//
+// Frequency trigger (reallocateFrequency):
+//   Hot levels (high access count) get a +10% per-key bonus on top.
 // ---------------------------------------------------------------------------
+class SSTable;
+
 struct BloomAllocator {
     // Structural trigger: called after AHLC compaction changes level shapes
     static void reallocateStructural(
         std::vector<BlockedBloomFilter>& filters,
         const std::vector<std::vector<std::vector<KVPair>>>& levels,
-        int total_budget_bits);
+        int bits_per_key,         // bits per key per level (primary driver)
+        size_t max_total_bytes);  // safety cap (e.g. 128 MB)
 
-    // Frequency trigger: micro-boost hot SSTables from cold ones
+    static void reallocateStructural(
+        std::vector<BlockedBloomFilter>& filters,
+        const std::vector<std::vector<std::shared_ptr<SSTable>>>& levels,
+        int bits_per_key,
+        size_t max_total_bytes);
+
+    // Frequency trigger: micro-boost hot SSTables (Merlin-style)
     static void reallocateFrequency(
         std::vector<BlockedBloomFilter>& filters,
         const std::vector<SStableAccessTracker>& trackers,
         const std::vector<std::vector<std::vector<KVPair>>>& levels,
-        int total_budget_bits);
+        int bits_per_key);        // base bits/key — bonus is +10% of this
+
+    static void reallocateFrequency(
+        std::vector<BlockedBloomFilter>& filters,
+        const std::vector<SStableAccessTracker>& trackers,
+        const std::vector<std::vector<std::shared_ptr<SSTable>>>& levels,
+        int bits_per_key);
 };
 
 } // namespace cascade

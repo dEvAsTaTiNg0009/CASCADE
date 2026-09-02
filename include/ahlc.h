@@ -1,7 +1,7 @@
-#include <memory>
 #pragma once
 // =============================================================================
 // ahlc.h — Adaptive Hybrid Lightweight Compaction Engine
+#include <memory>
 //
 // Multi-signal telemetry:
 //   V_w  : EWMA write velocity (bytes/sec)
@@ -40,8 +40,10 @@ struct WriteVelocityTracker {
 
     using Clock = std::chrono::high_resolution_clock;
     Clock::time_point last_flush_time = Clock::now();
+    std::shared_ptr<std::mutex> mu = std::make_shared<std::mutex>();
 
     void recordFlush(int bytes_flushed) {
+        std::lock_guard<std::mutex> lk(*mu);
         auto now = Clock::now();
         double dt = std::chrono::duration<double>(now - last_flush_time).count();
         last_flush_time = now;
@@ -50,7 +52,10 @@ struct WriteVelocityTracker {
         ewma_velocity = alpha * instant + (1.0 - alpha) * ewma_velocity;
     }
 
-    double velocity() const { return ewma_velocity; }
+    double velocity() const {
+        std::lock_guard<std::mutex> lk(*mu);
+        return ewma_velocity;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -114,14 +119,23 @@ public:
         if (desired != current_) {
             current_ = desired;
             cooldown_ = cfg_.ahlc_hysteresis_epochs;
-            switches_++;
+            // Atomic increment — safe to call from any thread without external lock
+            switches_total_.fetch_add(1, std::memory_order_relaxed);
+            switches_delta_.fetch_add(1, std::memory_order_relaxed);
         }
         return current_;
     }
 
     Strategy current()  const { return current_; }
-    int      switches() const { return switches_; }
-    void     reset()          { current_ = Strategy::HYBRID; cooldown_ = 0; switches_ = 0; }
+    // Total cumulative switches since construction
+    int switches()      const { return switches_total_.load(std::memory_order_relaxed); }
+    // Drain pending delta — atomically returns and resets the unreported switch count.
+    // Call from doCompaction() instead of the old TOCTOU compare-then-add pattern.
+    int drainSwitchDelta() {
+        return switches_delta_.exchange(0, std::memory_order_acq_rel);
+    }
+    void reset() { current_ = Strategy::HYBRID; cooldown_ = 0;
+                   switches_total_.store(0); switches_delta_.store(0); }
 
     // Strategy-aware level parameters
     struct LevelParams { int maxRuns; int capacityMult; };
@@ -137,27 +151,47 @@ public:
 private:
     const Config& cfg_;
     Strategy current_;
-    int cooldown_  = 0;
-    int switches_  = 0;
+    int      cooldown_ = 0;
+    // Separate counters: total (for reporting) and delta (for doCompaction TOCTOU fix)
+    std::atomic<int> switches_total_{0};
+    std::atomic<int> switches_delta_{0};
 };
 
 // ---------------------------------------------------------------------------
-// Compaction functions (operate on KVPair runs)
+// Compaction functions (operate on KVPair runs or real file-backed SSTables)
 // ---------------------------------------------------------------------------
 using Level = std::vector<std::vector<KVPair>>;  // list of sorted runs
+class SSTable;
+using SSTableLevel = std::vector<std::shared_ptr<SSTable>>;
 
 // Merge all runs at `level` into one sorted run, push to level+1 (Leveling)
 void compactLeveling(std::vector<Level>& levels, int level,
                      std::atomic<int64_t>& bytes_written);
 
+void compactLeveling(std::vector<SSTableLevel>& levels, int level,
+                     const std::string& db_path,
+                     std::atomic<int64_t>& bytes_written,
+                     int bloom_bits_per_key = 14);
+
 // Merge runs only when run count >= maxRuns (Tiering)
 void compactTiering(std::vector<Level>& levels, int level, int maxRuns,
                     std::atomic<int64_t>& bytes_written);
+
+void compactTiering(std::vector<SSTableLevel>& levels, int level, int maxRuns,
+                    const std::string& db_path,
+                    std::atomic<int64_t>& bytes_written,
+                    int bloom_bits_per_key = 14);
 
 // Sub-compaction: key-range merge on [lo, hi) subset of runs (granular)
 void compactSubRange(std::vector<Level>& levels, int level,
                      Key lo, Key hi,
                      std::atomic<int64_t>& bytes_written);
+
+void compactSubRange(std::vector<SSTableLevel>& levels, int level,
+                     Key lo, Key hi,
+                     const std::string& db_path,
+                     std::atomic<int64_t>& bytes_written,
+                     int bloom_bits_per_key = 14);
 
 // Merge k sorted runs (k-way merge with deduplication + tombstone removal)
 std::vector<KVPair> mergeRuns(std::vector<std::vector<KVPair>>& runs,

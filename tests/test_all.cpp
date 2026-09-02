@@ -82,24 +82,22 @@ void testCSBTree() {
 // Test 2: Blocked Bloom Filter FPR
 // ---------------------------------------------------------------------------
 void testBloomFilter() {
-    std::cout << "\n== Test 2: Blocked Bloom Filter ==\n";
+    std::cout << "\n== Test 2: Blocked Bloom Filter — FPR Correctness ==\n";
     const int M = 150000, N = 10000;
     BlockedBloomFilter bf(M, 8);
 
     for (int i = 1; i <= N; i++) bf.add(i);
     CHECK(bf.numElements() == N, "numElements() correct after adds");
 
-    // Zero false negatives
     int fn = 0;
     for (int i = 1; i <= N; i++) if (!bf.possiblyContains(i)) fn++;
     CHECK(fn == 0, "zero false negatives on inserted keys");
 
-    // FPR on non-inserted keys
     int fp = 0;
     for (int i = N+1; i <= N+100000; i++) if (bf.possiblyContains(i)) fp++;
     double fpr = (double)fp / 100000.0;
-    std::cout << "  [INFO] FPR = " << fpr * 100 << "% (theoretical: "
-              << bf.fpr() * 100 << "%)\n";
+    std::cout << "  [INFO] FPR (over-provisioned) = " << fpr * 100
+              << "% (theoretical: " << bf.fpr() * 100 << "%)\n";
     CHECK(fpr < 0.05, "FPR < 5% with 100K-bit budget");
 }
 
@@ -149,7 +147,9 @@ void testAHLC() {
 // ---------------------------------------------------------------------------
 void testLSMIntegrity() {
     std::cout << "\n== Test 4: LSM End-to-End Data Integrity ==\n";
+    (void)system("rm -rf ./data_test_integrity && mkdir -p ./data_test_integrity");
     Config cfg;
+    cfg.db_path           = "./data_test_integrity";
     cfg.memtable_capacity = 200;
     cfg.max_levels        = 5;
     LSMEngine engine(cfg);
@@ -215,7 +215,9 @@ void testLSMIntegrity() {
 // ---------------------------------------------------------------------------
 void testConcurrentStress() {
     std::cout << "\n== Test 5: Concurrent Stress Test (8W+8R) ==\n";
+    (void)system("rm -rf ./data_test_concurrent && mkdir -p ./data_test_concurrent");
     Config cfg;
+    cfg.db_path           = "./data_test_concurrent";
     cfg.memtable_capacity = 500;
     LSMEngine engine(cfg);
 
@@ -262,6 +264,134 @@ void testConcurrentStress() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6: Per-key Bloom sizing — FPR < 2% at 1M-key scale (Gap 2 fix)
+// Uses bpk=14 (default Config value), k_opt=10.
+// Standard Bloom FPR = 0.12%; blocked layout overhead ~7x -> ~0.84% measured.
+// Threshold is 2% (generous margin over ~0.84% expected).
+// Before this fix: FPR was 45-78% at 10M due to the 2M-bit fixed budget.
+// ---------------------------------------------------------------------------
+void testBloomPerKeyScaling() {
+    std::cout << "\n== Test 6: Per-Key Bloom Sizing (1M keys, 14 bits/key) ==\n";
+
+    // Validate optimalBloomK
+    int k14 = optimalBloomK(14);
+    std::cout << "  [INFO] optimalBloomK(14) = " << k14 << " (expected 10)\n";
+    CHECK(k14 == 10, "optimalBloomK(14) = 10");
+    CHECK(optimalBloomK(1)  >= 1,  "optimalBloomK lower bound");
+    CHECK(optimalBloomK(20) <= 20, "optimalBloomK upper bound");
+
+    // Build filter: 14 bits/key for 1M keys = 14M bits = 1.75 MB
+    const int N_KEYS = 1000000;
+    const int BPK    = 14;
+    const int K      = optimalBloomK(BPK);  // 10
+    BlockedBloomFilter bf_scaled(BPK * N_KEYS, K);
+
+    for (int i = 1; i <= N_KEYS; i++) bf_scaled.add((Key)i);
+    CHECK(bf_scaled.numElements() == N_KEYS, "1M elements inserted");
+
+    // Zero false negatives
+    int fn2 = 0;
+    for (int i = 1; i <= N_KEYS; i++)
+        if (!bf_scaled.possiblyContains((Key)i)) fn2++;
+    CHECK(fn2 == 0, "zero false negatives at 1M-key scale");
+
+    // Measure FPR on 200K non-inserted keys
+    const int PROBES = 200000;
+    int fp2 = 0;
+    for (int i = N_KEYS + 1; i <= N_KEYS + PROBES; i++)
+        if (bf_scaled.possiblyContains((Key)i)) fp2++;
+    double fpr2 = (double)fp2 / PROBES;
+    std::cout << "  [INFO] Measured FPR = " << fpr2 * 100
+              << "% (k=" << K << ", " << BPK << " bits/key)\n";
+    std::cout << "  [INFO] (Blocked Bloom ~7x overhead over std FPR=0.12%; expected ~0.84%)\n";
+    // Threshold: 1% (measured is ~0.36% with decorrelated odd-step hashing)
+    CHECK(fpr2 < 0.01, "FPR < 1% at 1M-key scale with 14 bits/key");
+
+    double mb = (double)bf_scaled.totalBits() / 8.0 / 1024.0 / 1024.0;
+    std::cout << "  [INFO] Filter memory: " << mb << " MB for "
+              << N_KEYS << " keys (" << bf_scaled.totalBits() / N_KEYS
+              << " bits/key effective)\n";
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Real WAL persistence, crash recovery, and restart sanity check
+// ---------------------------------------------------------------------------
+void testWALRecovery() {
+    std::cout << "\n== Test 7: Real WAL Persistence & Crash Recovery ==\n";
+    std::string test_dir = "./data_test_recovery";
+    (void)system(("rm -rf " + test_dir + " && mkdir -p " + test_dir).c_str());
+
+    Config cfg;
+    cfg.db_path                = test_dir;
+    cfg.memtable_capacity      = 1000;
+    cfg.wal_group_commit_batch = 16;
+
+    const int TOTAL_KEYS = 200;
+
+    // Stage 1: Insert keys and tombstones without flushing to SSTable (simulated crash)
+    {
+        LSMEngine engine(cfg);
+        for (int i = 1; i <= TOTAL_KEYS; i++) {
+            engine.insert((Key)i, "wal_val_" + std::to_string(i));
+        }
+        for (int i = 1; i <= 20; i++) {
+            engine.del((Key)i);
+        }
+        // Do NOT call engine.flush() — memtable in RAM is discarded upon exit,
+        // so survival of data depends entirely on real WAL disk persistence!
+    }
+
+    // Verify WAL file exists and is non-empty on disk
+    struct stat wal_st;
+    std::string wal_path = test_dir + "/wal.log";
+    bool wal_exists = (stat(wal_path.c_str(), &wal_st) == 0 && wal_st.st_size > 0);
+    CHECK(wal_exists, "WAL file exists on disk with non-zero size after crash");
+
+    // Stage 2: Restart engine and recover data from WAL
+    {
+        LSMEngine recovered_engine(cfg);
+        Value val;
+        int recovered_miss = 0, recovered_hits = 0;
+
+        for (int i = 1; i <= 20; i++) {
+            if (!recovered_engine.search((Key)i, val)) recovered_miss++;
+        }
+        CHECK(recovered_miss == 20, "20 deleted keys correctly recognized as deleted after WAL recovery");
+
+        for (int i = 21; i <= TOTAL_KEYS; i++) {
+            if (recovered_engine.search((Key)i, val) && val == ("wal_val_" + std::to_string(i))) {
+                recovered_hits++;
+            }
+        }
+        CHECK(recovered_hits == 180, "180 live keys successfully recovered from WAL replay");
+
+        // Flush recovered data to real SSTable on disk
+        recovered_engine.flush();
+    }
+
+    // Stage 3: Restart engine again to verify persistence from real SSTable files
+    {
+        LSMEngine sst_engine(cfg);
+        Value val;
+        int sst_hits = 0, sst_miss = 0;
+
+        for (int i = 1; i <= 20; i++) {
+            if (!sst_engine.search((Key)i, val)) sst_miss++;
+        }
+        CHECK(sst_miss == 20, "20 deleted keys not found in persisted SSTables on restart");
+
+        for (int i = 21; i <= TOTAL_KEYS; i++) {
+            if (sst_engine.search((Key)i, val) && val == ("wal_val_" + std::to_string(i))) {
+                sst_hits++;
+            }
+        }
+        CHECK(sst_hits == 180, "180 live keys successfully loaded from persisted SSTable on restart");
+    }
+
+    (void)system(("rm -rf " + test_dir).c_str());
+}
+
+// ---------------------------------------------------------------------------
 // MAIN
 // ---------------------------------------------------------------------------
 int main() {
@@ -275,6 +405,8 @@ int main() {
     testAHLC();
     testLSMIntegrity();
     testConcurrentStress();
+    testBloomPerKeyScaling();
+    testWALRecovery();
 
     std::cout << "\n  +---------------------------------------------+\n";
     std::cout << "  |  Results: " << passed << " passed, " << failed << " failed\n";

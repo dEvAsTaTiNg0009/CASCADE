@@ -25,21 +25,49 @@ struct KVPair {
 
 static constexpr Key TOMBSTONE = std::numeric_limits<Key>::max();
 
+// Selects the memtable implementation used by LSMEngine.
+// CSB_PLUS  — Concurrent CSB+ Tree (cache-line aligned, OLC, epoch-GC)
+// SKIP_LIST — Concurrent SkipList  (fine-grained spinlocks, simpler but
+//             higher cache miss rate due to pointer chasing)
+enum class MemtableType { CSB_PLUS, SKIP_LIST };
+
 // Engine configuration
 struct Config {
-    int    memtable_capacity      = 4096;
-    int    max_levels             = 7;
-    int    bloom_total_budget     = 2000000;
-    double ahlc_write_rate_high   = 5000.0;
-    double ahlc_skew_threshold    = 0.65;
-    int    ahlc_hysteresis_epochs = 3;
-    double ahlc_ewma_alpha        = 0.3;
-    size_t block_cache_capacity   = 64ULL * 1024 * 1024;
-    int    wal_group_commit_batch = 64;
-    double ssd_write_ns_per_byte  = 2.0;
-    double ssd_read_ns_per_byte   = 0.5;
-    int    bytes_per_kv           = 72;
+    int          memtable_capacity      = 4096;
+    int          max_levels             = 7;
+
+    // Bloom filter sizing — per-key model (Monkey-optimal per-level allocation)
+    // Each level i gets: max(512, bloom_bits_per_key * |L_i| * depth_mult_i) bits
+    // depth_mult_i = 1 + 0.1*i  (deeper levels get more bits/key)
+    //
+    // FPR guide for Blocked Bloom (512-bit block, empirical ~7x standard overhead):
+    //   bpk=10, k=7  -> std 0.82%, measured blocked ~6%  (not suitable for research claims)
+    //   bpk=14, k=10 -> std 0.12%, measured blocked ~1%  ← DEFAULT (good for publication)
+    //   bpk=20, k=14 -> std 0.007%,measured blocked ~0.05% (high accuracy, more RAM)
+    int          bloom_bits_per_key     = 14;  // bits per key per level (14 → FPR ≈ 1%)
+    size_t       bloom_max_bytes        = 256ULL * 1024 * 1024; // 256MB safety cap
+    int          bloom_total_budget     = 2000000; // kept for compat; NOT used by allocator
+
+    double       ahlc_write_rate_high   = 5000.0;
+    double       ahlc_skew_threshold    = 0.65;
+    int          ahlc_hysteresis_epochs = 3;
+    double       ahlc_ewma_alpha        = 0.3;
+    size_t       block_cache_capacity   = 64ULL * 1024 * 1024;
+    int          wal_group_commit_batch = 64;
+    double       ssd_write_ns_per_byte  = 2.0;
+    double       ssd_read_ns_per_byte   = 0.5;
+    int          bytes_per_kv           = 72;
+    std::string  db_path                = "./data";
+    MemtableType memtable_type          = MemtableType::CSB_PLUS;
 };
+
+// Optimal k (number of hash functions) for a given bits-per-key budget.
+// k_opt = ln(2) * m/n ≈ 0.693 * bits_per_key
+// Clamped to [1, 20] — beyond k=20 the blocked layout shows diminishing gains.
+inline int optimalBloomK(int bits_per_key) {
+    int k = static_cast<int>(0.693147 * bits_per_key + 0.5);
+    return std::max(1, std::min(k, 20));
+}
 
 // splitmix64 — excellent avalanche, fast
 inline uint64_t hash64(uint64_t x) {

@@ -1,25 +1,22 @@
 #pragma once
 // =============================================================================
-// sstable.h — SSTable file format (in-memory simulation)
+// sstable.h — Real disk file-backed SSTable format
 //
 // Format:
 //   [DATA BLOCKS ...] [INDEX BLOCK] [FILTER BLOCK] [FOOTER]
 //
 // Data Block (4KB):
-//   Series of KV entries with restart points for binary search.
+//   Series of KV entries.
 //   Entry: [key(8B)][val_len(4B)][val_bytes][is_tombstone(1B)]
 //
 // Index Block:
 //   One entry per data block: [min_key(8B)][max_key(8B)][offset(8B)][size(4B)]
 //
 // Filter Block:
-//   Raw Bloom filter bits for this SSTable.
+//   Serialized BlockedBloomFilter bits for this SSTable.
 //
 // Footer (32B):
 //   [index_offset(8B)][filter_offset(8B)][num_entries(8B)][magic(8B)]
-//
-// In this research prototype, data is held in memory (no actual disk I/O)
-// but byte sizes are computed exactly for WAF/RAF/SAF accounting.
 // =============================================================================
 #include "common.h"
 #include "bloom.h"
@@ -27,12 +24,14 @@
 #include <cstdint>
 #include <atomic>
 #include <memory>
+#include <string>
 
 namespace cascade {
 
 static constexpr uint64_t SSTABLE_MAGIC = 0xCA5CADE0F11EULL;
 static constexpr int BLOCK_SIZE = 4096;
 
+#pragma pack(push, 1)
 struct IndexEntry {
     Key      min_key;
     Key      max_key;
@@ -40,40 +39,65 @@ struct IndexEntry {
     uint32_t block_size;
 };
 
+struct SSTableFooter {
+    uint64_t index_offset;
+    uint64_t filter_offset;
+    uint64_t num_entries;
+    uint64_t magic;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(IndexEntry) == 28, "IndexEntry must be 28 bytes");
+static_assert(sizeof(SSTableFooter) == 32, "SSTableFooter must be 32 bytes");
+
+class BlockCache;
+
 class SSTable {
 public:
-    uint64_t id;
-    Key      min_key;
-    Key      max_key;
-    uint64_t file_size = 0; // simulated byte size
+    uint64_t id = 0;
+    Key      min_key = 0;
+    Key      max_key = 0;
+    uint64_t file_size = 0;
+    std::string filepath;
 
-    // All data, held in memory (simulation of disk)
-    std::vector<KVPair>    data;          // sorted KV pairs
-    std::vector<IndexEntry> index;        // data block index
-    BlockedBloomFilter     filter;        // per-table Bloom filter
+    std::vector<IndexEntry> index;
+    BlockedBloomFilter     filter;
+    uint64_t               num_entries = 0;
 
-    // Access frequency for Merlin tracker
     std::atomic<int>       access_count{0};
+    int                    fd_ = -1;
 
+    SSTable(uint64_t id_, std::string path_, int fd_);
+    ~SSTable();
+
+    // Deprecated in-memory-only constructor
+    [[deprecated("Use SSTableBuilder::build() for real disk-backed SSTables")]]
     explicit SSTable(uint64_t id_, std::vector<KVPair> sorted_data, int bloom_bits = 8192);
 
-    // Point lookup (uses bloom first)
+    static std::shared_ptr<SSTable> open(uint64_t id, const std::string& filepath);
+
     bool search(Key key, Value& out);
+    bool search(Key key, Value& out, bool& is_tombstone, BlockCache* cache = nullptr);
 
-    // Range scan
-    std::vector<KVPair> scan(Key start, Key end);
+    std::vector<KVPair> scan(Key start, Key end, BlockCache* cache = nullptr);
+    std::vector<KVPair> readAll();
 
-    int numEntries() const { return (int)data.size(); }
+    void removeFile();
+    int numEntries() const { return (int)num_entries; }
 
-public:
-    static uint64_t next_id_;
-    void buildIndex();
-    void computeFileSize();
+    static std::atomic<uint64_t> next_id_;
 };
 
-// Builder: creates an SSTable from a sorted run
 class SSTableBuilder {
 public:
+    static std::shared_ptr<SSTable> build(
+        const std::string& filepath,
+        uint64_t id,
+        const std::vector<KVPair>& sorted_run,
+        int bloom_bits,
+        std::atomic<int64_t>& bytes_written_counter);
+
+    // Backward-compatible overload
     static std::shared_ptr<SSTable> build(
         std::vector<KVPair> sorted_run,
         int bloom_bits,

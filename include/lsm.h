@@ -3,11 +3,12 @@
 // lsm.h — Cascaded LSM Engine Orchestrator
 //
 // Wires together all 5 modules:
-//   MemTable (ConcurrentCSBTree) → WAL → Levels (SSTable runs) →
+//   MemTable (ConcurrentCSBTree or SkipListMemtable) → WAL → Levels →
 //   AHLC Compaction → Dual-trigger Bloom → Block Cache → Metrics
 // =============================================================================
 #include "common.h"
 #include "csb_tree.h"
+#include "skiplist_mt.h"
 #include "bloom.h"
 #include "ahlc.h"
 #include "sstable.h"
@@ -47,8 +48,9 @@ public:
 private:
     Config                cfg_;
 
-    // Module 1: Concurrent CSB+ MemTable
-    ConcurrentCSBTree     memtable_;
+    // Module 1: Concurrent MemTable — either CSB+ or SkipList (selected by cfg.memtable_type)
+    ConcurrentCSBTree                  memtable_;    // used when memtable_type == CSB_PLUS
+    std::unique_ptr<SkipListMemtable>  skiplist_mt_; // used when memtable_type == SKIP_LIST
 
     // Module 2: AHLC + telemetry
     AHLCEngine            ahlc_;
@@ -59,10 +61,11 @@ private:
     std::vector<BlockedBloomFilter>    bloom_filters_;
     std::vector<SStableAccessTracker>  access_trackers_;
 
-    // Module 4: Levels (list of sorted SSTable runs per level)
-    using Run = std::vector<KVPair>;
-    std::vector<std::vector<Run>>  levels_;  // levels_[i] = list of sorted runs
-    mutable std::mutex             levels_mu_;
+    // Module 4: Levels (list of sorted SSTables per level on disk)
+    using SSTablePtr = std::shared_ptr<SSTable>;
+    std::vector<std::vector<SSTablePtr>> levels_;  // levels_[i] = list of real SSTables
+    mutable std::mutex                   levels_mu_;
+    mutable std::mutex                   flush_mu_;
 
     // WAL
     WAL wal_;
@@ -92,6 +95,7 @@ private:
     int  countPhysicalKeys() const;
     void backgroundLoop();
     void requestCompaction();
+    void loadExistingSSTables();
 };
 
 } // namespace cascade
