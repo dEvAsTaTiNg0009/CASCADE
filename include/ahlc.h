@@ -96,13 +96,22 @@ struct GiniSkewEstimator {
     }
 };
 
+struct StrategySwitchLog {
+    double timestamp_ms;
+    Strategy from_strategy;
+    Strategy to_strategy;
+    double write_velocity;
+    double skew;
+};
+
 // ---------------------------------------------------------------------------
 // AHLC Strategy Selector with Hysteresis FSM
 // ---------------------------------------------------------------------------
 class AHLCEngine {
 public:
     explicit AHLCEngine(const Config& cfg)
-        : cfg_(cfg), current_(Strategy::HYBRID), cooldown_(0) {}
+        : cfg_(cfg), current_(Strategy::HYBRID), cooldown_(0),
+          start_time_(std::chrono::high_resolution_clock::now()) {}
 
     // Called after each flush: update signals and possibly switch strategy
     Strategy evaluate(double write_velocity, double skew, bool any_level_full) {
@@ -117,6 +126,12 @@ public:
             desired = Strategy::HYBRID;
 
         if (desired != current_) {
+            {
+                std::lock_guard<std::mutex> lk(log_mu_);
+                auto now = std::chrono::high_resolution_clock::now();
+                double ms = std::chrono::duration<double, std::milli>(now - start_time_).count();
+                switch_log_.push_back({ms, current_, desired, write_velocity, skew});
+            }
             current_ = desired;
             cooldown_ = cfg_.ahlc_hysteresis_epochs;
             // Atomic increment — safe to call from any thread without external lock
@@ -129,13 +144,22 @@ public:
     Strategy current()  const { return current_; }
     // Total cumulative switches since construction
     int switches()      const { return switches_total_.load(std::memory_order_relaxed); }
+    std::vector<StrategySwitchLog> switchLog() const {
+        std::lock_guard<std::mutex> lk(log_mu_);
+        return switch_log_;
+    }
     // Drain pending delta — atomically returns and resets the unreported switch count.
     // Call from doCompaction() instead of the old TOCTOU compare-then-add pattern.
     int drainSwitchDelta() {
         return switches_delta_.exchange(0, std::memory_order_acq_rel);
     }
-    void reset() { current_ = Strategy::HYBRID; cooldown_ = 0;
-                   switches_total_.store(0); switches_delta_.store(0); }
+    void reset() {
+        current_ = Strategy::HYBRID; cooldown_ = 0;
+        switches_total_.store(0); switches_delta_.store(0);
+        std::lock_guard<std::mutex> lk(log_mu_);
+        switch_log_.clear();
+        start_time_ = std::chrono::high_resolution_clock::now();
+    }
 
     // Strategy-aware level parameters
     struct LevelParams { int maxRuns; int capacityMult; };
@@ -155,6 +179,9 @@ private:
     // Separate counters: total (for reporting) and delta (for doCompaction TOCTOU fix)
     std::atomic<int> switches_total_{0};
     std::atomic<int> switches_delta_{0};
+    mutable std::mutex log_mu_;
+    std::vector<StrategySwitchLog> switch_log_;
+    std::chrono::high_resolution_clock::time_point start_time_;
 };
 
 // ---------------------------------------------------------------------------

@@ -90,27 +90,32 @@ struct YCSBWorkloadConfig {
 
 // Predefined YCSB workloads A–F
 inline YCSBWorkloadConfig workloadA(int ops = 100000) {
-    return {"A(50R/50U)", ops, ops/2, 1000000, 0.99, 0.5, 0.0, 0.5};
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    return {"A(50R/50U)", ops, ops/2, ks, 0.99, 0.5, 0.0, 0.5};
 }
 inline YCSBWorkloadConfig workloadB(int ops = 100000) {
-    return {"B(95R/5U)", ops, ops/2, 1000000, 0.99, 0.95, 0.0, 0.05};
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    return {"B(95R/5U)", ops, ops/2, ks, 0.99, 0.95, 0.0, 0.05};
 }
 inline YCSBWorkloadConfig workloadC(int ops = 100000) {
-    return {"C(100R)", ops, ops/2, 1000000, 0.99, 1.0, 0.0, 0.0};
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    return {"C(100R)", ops, ops/2, ks, 0.99, 1.0, 0.0, 0.0};
 }
 inline YCSBWorkloadConfig workloadD(int ops = 100000) {
-    // Read latest — recent inserts most popular (uniform for simplicity)
-    return {"D(95R/5I)", ops, ops/2, 1000000, 0.0, 0.95, 0.05, 0.0};
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    return {"D(95R/5I)", ops, ops/2, ks, 0.0, 0.95, 0.05, 0.0};
 }
 inline YCSBWorkloadConfig workloadE(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
     YCSBWorkloadConfig c;
-    c.name = "E(95Scan/5I)"; c.num_ops = ops; c.record_count = ops/2;
+    c.name = "E(95Scan/5I)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
     c.read_frac = 0.0; c.scan_frac = 0.95; c.insert_frac = 0.05;
     return c;
 }
 inline YCSBWorkloadConfig workloadF(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
     YCSBWorkloadConfig c;
-    c.name = "F(50R/50RMW)"; c.num_ops = ops;
+    c.name = "F(50R/50RMW)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
     c.read_frac = 0.5; c.rmw_frac = 0.5;
     return c;
 }

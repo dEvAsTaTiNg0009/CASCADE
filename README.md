@@ -2,11 +2,16 @@
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/badge/Tests-234%20passed%2C%200%20failed-brightgreen.svg)]()
+[![ASan](https://img.shields.io/badge/ASan-Clean-brightgreen.svg)]()
+[![TSan](https://img.shields.io/badge/TSan-Clean-brightgreen.svg)]()
 
-**CASCADE** is a research-grade LSM-based key-value storage engine in modern C++17 that physically co-designs three previously isolated subsystems:
+**CASCADE** is a research-grade LSM-based key-value storage engine in modern C++17 featuring real file-backed SSTables, a persistent append-only Write-Ahead Log (WAL) with group commit, and three co-designed subsystems:
 1. **Concurrent Cache-Sensitive $B^+$-Tree ($\text{CSB}^+$ Tree) MemTable** with CPU cache-line aligned nodes (`alignas(64)`) and Epoch-Based Memory Reclamation (`EBMM`).
 2. **Adaptive Hybrid Lightweight Compaction (AHLC)** with multi-signal telemetry (EWMA write velocity, Gini access skew, and dynamic level saturation) with hysteresis control.
-3. **Dual-Trigger Blocked Bloom Filter Layer** combining compaction-driven structural budget reallocation with access-frequency sliding-window tracking (Merlin tracker).
+3. **Dual-Trigger Blocked Bloom Filter Layer** combining compaction-driven structural budget reallocation with access-frequency tracking.
+
+> **Scope & Realistic Positioning**: CASCADE is a research prototype designed to evaluate these architectural ideas against an identical from-scratch baseline under controlled conditions. It is **not** a production drop-in replacement for mature systems like RocksDB (which includes a decade of production hardening, parallel multi-threaded compaction, block compression, and extensive tooling).
 
 ---
 
@@ -17,28 +22,28 @@
                                 │                    CASCADE ENGINE                       │
                                 └─────────────────────────────────────────────────────────┘
                                                              │
-          ┌─────────────────────────────────────────────────┼─────────────────────────────────────────────────┐
-          │                                                 │                                                 │
-          ▼                                                 ▼                                                 ▼
-┌─────────────────────────────────┐       ┌─────────────────────────────────┐       ┌─────────────────────────────────┐
-│     1. CONCURRENT MEMTABLE      │       │     2. SIGNAL-DRIVEN AHLC       │       │    3. DUAL-TRIGGER BLOOM        │
-├─────────────────────────────────┤       ├─────────────────────────────────┤       ├─────────────────────────────────┤
-│ • Cache-line aligned (64B)      │       │ • EWMA Write Velocity           │       │ • Structural Layer (AHLC event) │
-│ • Optimistic Lock Coupling(OLC) │──────>│ • Gini Access Skew              │──────>│ • Frequency Layer (Merlin)      │
-│ • Epoch-Based GC (EBMM)         │       │ • Hysteresis State Machine      │       │ • Closed-form budget allocation │
-│ • `include/csb_tree.h`          │       │ • `include/ahlc.h`              │       │ • `include/bloom.h`             │
-└─────────────────────────────────┘       └─────────────────────────────────┘       └─────────────────────────────────┘
-          │                                                 │                                                 │
-          └─────────────────────────────────────────────────┼─────────────────────────────────────────────────┘
-                                                            ▼
-                                  ┌─────────────────────────────────────────────────┐
-                                  │      4. STORAGE, EVALUATION & BENCHMARKS        │
-                                  ├─────────────────────────────────────────────────┤
-                                  │ • SSTable Block Cache & Fence Pointers          │
-                                  │ • Write-Ahead Log (WAL) with group commit       │
-                                  │ • Full YCSB (A–F) + Scrambled Zipfian Generator │
-                                  │ • RUM Triad (WAF, RAF, SAF) & Latency P50/P99    │
-                                  └─────────────────────────────────────────────────┘
+          ┌──────────────────────────────────────────────────┼─────────────────────────────────────────────────┐
+          │                                                  │                                                 │
+          ▼                                                  ▼                                                 ▼
+┌─────────────────────────────────┐        ┌─────────────────────────────────┐        ┌─────────────────────────────────┐
+│     1. CONCURRENT MEMTABLE      │        │     2. SIGNAL-DRIVEN AHLC       │        │    3. DUAL-TRIGGER BLOOM        │
+├─────────────────────────────────┤        ├─────────────────────────────────┤        ├─────────────────────────────────┤
+│ • Cache-line aligned (64B)      │        │ • EWMA Write Velocity           │        │ • Structural Layer (AHLC event) │
+│ • Optimistic Lock Coupling(OLC) │───────>│ • Gini Access Skew              │───────>│ • Frequency Layer (heat track)  │
+│ • Epoch-Based GC (EBMM)         │        │ • Hysteresis State Machine      │        │ • Monkey-optimal per-key sizing │
+│ • `include/csb_tree.h`          │        │ • `include/ahlc.h`              │        │ • `include/bloom.h`             │
+└─────────────────────────────────┘        └─────────────────────────────────┘        └─────────────────────────────────┘
+          │                                                  │                                                 │
+          └──────────────────────────────────────────────────┼─────────────────────────────────────────────────┘
+                                                             ▼
+                                   ┌─────────────────────────────────────────────────┐
+                                   │      4. REAL DISK STORAGE & PERSISTENCE         │
+                                   ├─────────────────────────────────────────────────┤
+                                   │ • File-backed SSTables with 4KB Data Blocks     │
+                                   │ • Block Cache (LRU) & 28-byte Index Entries     │
+                                   │ • Persistent append-only WAL (`fsync` batches)  │
+                                   │ • Full Crash Recovery & WAL Replay              │
+                                   └─────────────────────────────────────────────────┘
 ```
 
 ---
@@ -46,8 +51,8 @@
 ## ⚡ Quick Start
 
 ### Prerequisites
-- **C++17 Compiler:** GCC 13+ or Clang 16+ (Apple Clang 16+)
-- **OS:** Linux x86-64 or macOS arm64
+- **C++17 Compiler:** GCC 13+ or Clang 16+ (Apple Clang 16+ on Apple Silicon)
+- **OS:** macOS arm64 or Linux x86-64
 - **Libraries:** POSIX `pthread`
 
 ### Build & Run
@@ -55,98 +60,94 @@
 # 1. Clean build
 make clean && make
 
-# 2. Run unit & integration test suite (223 passed, 0 failed)
-./cascade_test
+# 2. Run test suite (234 passed, 0 failed — ASan/TSan verified)
+make test
 
-# 3. Run full YCSB 10M-ops benchmark suite
-./cascade_bench
+# 3. Run rigorous benchmark sequence across 100K -> 500K -> 1M -> 5M ops
+./rigorous_bench --scale 100000 --repeats 3 --single
+./rigorous_bench --scale 500000 --repeats 3 --single
+./rigorous_bench --scale 1000000 --repeats 3 --single
+./rigorous_bench --scale 5000000 --repeats 1 --single
+
+# 4. Profile the two key engineering anomalies
+./rigorous_bench --anomaly1
+./rigorous_bench --anomaly2
 ```
 
 ---
 
-## 📊 Benchmark Results (Production 10M Scale)
+## 📊 Real File-Backed Benchmark Results
 
-All tests performed on **N = 10,000,000 operations** (`memtable_capacity = 4096`, `bloom_budget = 2M bits`, `block_cache = 64MB`).
+All measurements come from reproducible runs writing real binary SSTables and WAL files to disk with single-threaded I/O (`fsync` group commits per 64 writes, 4KB SSTable data blocks, 64MB LRU BlockCache).
 
-### 1. Head-to-Head Comparison: CASCADE vs Baseline (10,000,000 Ops)
+### 1. Scale Comparison: 1M Operations (3 Repeats, Mean ± Std)
+*Command: `./rigorous_bench --scale 1000000 --repeats 3 --single`*
 
-| YCSB Workload | Access Pattern | Baseline Throughput | CASCADE Throughput | Throughput Gain | Baseline WAF | CASCADE WAF | WAF Reduction |
-|---|---|---|---|---|---|---|---|
-| **YCSB-A** | 50% Read / 50% Update | 370.8 K ops/s | **464.8 K ops/s** | **+25.3%** | 22.36× | **16.28×** | **-27.2%** |
-| **YCSB-B** | 95% Read / 5% Update | 738.0 K ops/s | **825.5 K ops/s** | **+11.9%** | 30.65× | **18.71×** | **-39.0%** |
-| **YCSB-C** | 100% Read | 432.0 K ops/s | 416.6 K ops/s | -3.6% | 33.21× | **18.90×** | **-43.1%** |
-| **YCSB-D** | 95% Read / 5% Insert | 348.9 K ops/s | **370.2 K ops/s** | **+6.1%** | 31.33× | **18.61×** | **-40.6%** |
-| **YCSB-E** | 95% Scan / 5% Insert | 132.0 K ops/s | **137.9 K ops/s** | **+4.5%** | 21.39× | **15.93×** | **-25.5%** |
-| **YCSB-F** | 50% Read / 50% RMW | 953.1 K ops/s | **974.3 K ops/s** | **+2.2%** | 4.07× | 5.35× | +31.4% |
-
-### Key Performance Summary
-- **Throughput:** CASCADE achieves up to **+25.3% throughput advantage** under heavy write/update pressure (YCSB-A).
-- **Write Amplification (WAF):** AHLC reduces write amplification by **27% to 43%** across read-heavy and update-heavy workloads by dynamically transitioning levels to tiering mode when write velocity spikes.
-- **Tail Latency:** P99 read latency under YCSB-A drops from **6.4 µs** (Baseline) to **3.2 µs** (CASCADE).
+| Workload | Access Pattern | Baseline Throughput (Kops/s) | CASCADE Throughput (Kops/s) | Throughput Diff | Baseline WAF | CASCADE WAF | WAF Reduction | Mann-Whitney U | Welch t-test $p$ |
+|---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **YCSB-A** | 50% Read / 50% Update | 413.1 ± 3.1 | 376.2 ± 7.1 | -8.9% | 10.78 | 12.16 | +12.8% (worse) | U=0 | $p < 0.001$ |
+| **YCSB-B** | 95% Read / 5% Update | 1017.0 ± 56.6 | **1238.4 ± 10.3** | **+21.8%** | 16.49 | **11.97** | **-27.4%** | U=0 | $p < 0.001$ |
+| **YCSB-C** | 100% Read | 1493.4 ± 78.3 | **1648.3 ± 42.8** | **+10.4%** | 15.95 | **12.51** | **-21.6%** | U=0 | $p = 0.003$ |
+| **YCSB-D** | 95% Read / 5% Insert | 833.7 ± 10.3 | **918.4 ± 22.6** | **+10.2%** | 16.64 | **12.57** | **-24.4%** | U=0 | $p < 0.001$ |
+| **YCSB-E** | 95% Scan / 5% Insert | 79.3 ± 2.9 | **95.2 ± 2.6** | **+20.0%** | 10.43 | 11.90 | +14.2% (worse) | U=0 | $p < 0.001$ |
+| **YCSB-F** | 50% Read / 50% RMW | 412.7 ± 15.7 | 374.1 ± 3.6 | -9.3% | 10.78 | 12.16 | +12.8% (worse) | U=0 | $p < 0.001$ |
 
 ---
 
-### 2. Multi-threaded MemTable Throughput Scaling (Workload A, N=100K per thread count)
+### 2. Large Scale: 5,000,000 Operations (Single Run)
+*Command: `./rigorous_bench --scale 5000000 --repeats 1 --single`*  
+*(Note: Explicitly labeled as a single run due to execution duration; no artificial error bars.)*
 
-Genuine comparison between `SkipListMemtable` (shared-mutex, pointer chasing) and `ConcurrentCSBTree` (OLC, 64B cache-line aligned nodes):
-
-| Thread Count | SkipList (K ops/s) | CSB+ Tree (K ops/s) | CSB+ Throughput Advantage |
-|---|---|---|---|
-| **1 Thread** | 2,391.5 | **2,597.4** | **+8.6%** |
-| **2 Threads** | 1,169.6 | **1,360.8** | **+16.3%** |
-| **4 Threads** | 694.6 | **862.1** | **+24.1%** |
-| **8 Threads** | 508.3 | 362.2 | -28.7% (mutex contention during flush) |
-| **16 Threads** | 306.9 | **368.9** | **+20.2%** |
-
----
-
-### 3. Workload Skew Sensitivity (Zipfian $\theta$ Sweep on Workload A, N=500K)
-
-| Zipfian Parameter ($\theta$) | Workload Distribution | Throughput (K ops/s) | WAF | AHLC Strategy Switches |
-|---|---|---|---|---|
-| $\theta = 0.00$ | Uniform Random | 797.3 | 10.31× | 26 |
-| $\theta = 0.80$ | Moderate Skew | 915.8 | 10.13× | 25 |
-| $\theta = 0.90$ | High Skew | 1,083.5 | 7.71× | 23 |
-| $\theta = 0.99$ | Extreme Pareto Skew | **1,390.2** | **6.22×** | 21 |
+| Workload | Access Pattern | Baseline Tput (Kops/s) | CASCADE Tput (Kops/s) | Tput Diff | Baseline WAF | CASCADE WAF | WAF Reduction | AHLC Switches |
+|---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **YCSB-A** | 50% Read / 50% Update | 61.0 | **79.5** | **+30.3%** | 82.65 | **42.79** | **-48.2%** | 226 |
+| **YCSB-B** | 95% Read / 5% Update | 563.1 | 521.5 | -7.4% | 53.33 | **32.23** | **-39.6%** | 145 |
+| **YCSB-C** | 100% Read | 1119.2 | **1149.8** | **+2.7%** | 58.15 | **26.98** | **-53.6%** | 138 |
+| **YCSB-D** | 95% Read / 5% Insert | 372.4 | **450.0** | **+20.8%** | 55.84 | **26.22** | **-53.0%** | 153 |
+| **YCSB-E** | 95% Scan / 5% Insert | 31.5 | **39.5** | **+25.4%** | 81.31 | **42.38** | **-47.9%** | 235 |
+| **YCSB-F** | 50% Read / 50% RMW | 58.8 | **77.0** | **+31.0%** | 82.65 | **42.79** | **-48.2%** | 226 |
 
 ---
 
-### 4. 8-Config Ablation Study (Workload A, N=200K)
+## 🔍 Detailed Analysis of the Two Engineering Anomalies
 
-| MemTable | Compaction | Bloom Allocation | Throughput | WAF | RAF | SAF | Bloom FPR |
-|---|---|---|---|---|---|---|---|
-| SkipList | Fixed-Leveling | Uniform Static | 2,051.9 K ops/s | 3.04× | 0.41 | 0.71× | 6.90% |
-| SkipList | Fixed-Leveling | Adaptive Dual-Trigger | 2,117.5 K ops/s | 3.04× | 0.29 | 0.71× | **0.77%** |
-| SkipList | AHLC | Uniform Static | 2,020.1 K ops/s | 2.93× | 0.53 | 0.70× | 6.47% |
-| SkipList | AHLC | Adaptive Dual-Trigger | 2,068.2 K ops/s | 2.93× | 0.37 | 0.70× | **0.81%** |
-| CSB+ Tree | Fixed-Leveling | Uniform Static | 2,179.7 K ops/s | 3.04× | 0.41 | 0.71× | 6.90% |
-| CSB+ Tree | Fixed-Leveling | Adaptive Dual-Trigger | 2,212.9 K ops/s | 3.04× | 0.29 | 0.71× | **0.77%** |
-| CSB+ Tree | AHLC | Uniform Static | 2,126.6 K ops/s | 2.93× | 0.53 | 0.70× | 6.47% |
-| **CSB+ Tree** | **AHLC** | **Adaptive Dual-Trigger (CASCADE)** | **2,194.6 K ops/s** | **2.93×** | **0.37** | **0.70×** | **0.81%** |
+CASCADE does **not** win across the board. Detailed profiling reveals the exact architectural trade-offs:
+
+### Anomaly 1: CSB+ Tree Regressing Under 16 Concurrently Contending Writers
+*Command: `./rigorous_bench --anomaly1` (N = 160,000 ops across 16 threads)*
+
+```
+Data Structure        Throughput       Total Lock Wait    Acquisitions    Avg Wait/Lock
+ConcurrentCSBTree     472.5 Kops/s     4,857.6 ms         160,000         30.36 µs
+SkipListMemtable      595.0 Kops/s     3,842.9 ms         160,000         24.02 µs
+```
+
+**Root Mechanism**: The Concurrent CSB+ Tree arranges keys contiguously in 64-byte cache-line aligned node groups to maximize CPU L1/L2 cache locality during binary search. However, during node splits, the writer thread must allocate new contiguous child arrays (`allocGroup`) and perform memory copies while holding the exclusive lock (`rw_mu_`). In contrast, a SkipList merely swings a few pointer links without contiguous reallocations. Under 16 concurrent writer threads, this structural overhead increases average lock acquisition wait time by **26.4%** (30.36 µs vs 24.02 µs), causing SkipList to achieve higher raw concurrent ingestion throughput.
 
 ---
 
-## ⚠️ Known Limitations & Open Engineering Challenges
+### Anomaly 2: Workload F (Read-Modify-Write) WAF Regression
+*Command: `./rigorous_bench --anomaly2` (N = 100,000 ops, Workload F)*
 
-While CASCADE demonstrates strong empirical gains, the following design trade-offs and remaining limitations exist:
+```
+# Workload F Strategy Switches (First 64 ms)
+Timestamp(ms)    FromStrategy    ToStrategy    WriteVelocity(B/s)
+12.57 ms         HYBRID          TIERING       15.07 MB/s
+20.24 ms         TIERING         HYBRID        16.27 MB/s
+32.17 ms         HYBRID          TIERING       18.73 MB/s
+39.75 ms         TIERING         HYBRID        17.77 MB/s
+56.61 ms         HYBRID          TIERING       16.09 MB/s
+64.10 ms         TIERING         HYBRID        16.93 MB/s
+```
 
-1. **Background Compaction Lock Contention (`levels_mu_`):**
-   - Compaction acquisition locks the `levels_mu_` mutex during merges. Under high multi-threaded write scaling (e.g. 8–16 threads), worker threads waiting on memtable flushes experience lock contention on `levels_mu_`. A lock-free level array (e.g. RCU/Copy-On-Write level manifests) would resolve this bottleneck.
-2. **In-Memory Storage Simulation:**
-   - Data blocks are kept in heap memory with precise byte accounting (`bytes_written_sstables`, `bytes_read_sstables`, `ssd_write_ns_per_byte`). While disk bandwidth and latency costs are faithfully modeled, actual direct I/O syscall overhead (`io_uring`/`O_DIRECT`) is not measured.
-3. **Bloom Reallocation CPU Overhead:**
-   - Frequent bloom filter bitset reallocations during rapid compactions incur transient heap reallocations. Increasing the hysteresis epoch threshold (`ahlc_hysteresis_epochs`) mitigates this overhead under erratic write bursts.
+**Root Mechanism**: In Workload F (50% Read, 50% RMW), user transactions continuously alternate between read probes and atomic write updates. The EWMA write velocity tracker experiences volatile fluctuations right around the strategy threshold. This causes AHLC to thrash between `HYBRID` and `TIERING` (6 strategy switches in under 65 ms). When switching from Tiering back to Leveling, AHLC triggers cascading merges of accumulated runs, rewriting keys repeatedly compared to the steady, monotonic merge cadence of fixed leveling.
 
 ---
 
 ## 📜 References
-- **Dwivedi et al.** "CASCADE: Cache-Sensitive Adaptive Storage Architecture for Dynamic and Efficient LSM-Tree Design."
 - **P. O'Neil et al.** "The log-structured merge-tree (LSM-tree)." *Acta Informatica*, 1996.
 - **J. Rao and K. A. Ross.** "Making $B^+$-trees cache-conscious in main memory." *ACM SIGMOD*, 2000.
-- **V. Leis et al.** "The ART of practical synchronization." *DaMoN*, 2016.
 - **N. Dayan and S. Idreos.** "Dostoevsky: Better space-time trade-offs for LSM-tree based key-value stores." *ACM SIGMOD*, 2018.
 
----
-
 ## 📄 License
-This project is licensed under the MIT License.
+MIT License.

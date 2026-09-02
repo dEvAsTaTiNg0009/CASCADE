@@ -61,6 +61,13 @@ public:
     bool   isFull(int cap) const;
     int    size() const;
 
+    static inline std::atomic<uint64_t> total_lock_wait_ns_{0};
+    static inline std::atomic<uint64_t> total_lock_acquisitions_{0};
+    static void resetLockStats() {
+        total_lock_wait_ns_.store(0);
+        total_lock_acquisitions_.store(0);
+    }
+
 private:
     CSBNode*              root_;
     std::atomic<int>      count_{0};

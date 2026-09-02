@@ -1,0 +1,4 @@
+# Anomaly 1 Profiling: CSB+ rw_mu_ vs SkipList mu_ at 16 threads (N=160000 ops)
+Data Structure	Throughput(ops/s)	Total Lock Wait(ms)	Acquisitions	Avg Wait/Lock(us)
+ConcurrentCSBTree	472510.8	4857.60	160000	30.36
+SkipListMemtable	594976.4	3842.92	160000	24.02

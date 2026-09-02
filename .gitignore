@@ -4,6 +4,7 @@ cascade_bench
 cascade_asan
 cascade_tsan
 scale_bench
+rigorous_bench
 test_asan
 test_tsan
 *.o

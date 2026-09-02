@@ -45,7 +45,7 @@ public:
         buckets_[b].fetch_add(1, std::memory_order_relaxed);
     }
 
-    uint64_t percentile(double p) {
+    uint64_t percentile(double p) const {
         uint64_t total = count_.load(std::memory_order_relaxed);
         if (total == 0) return 0;
         uint64_t target = (uint64_t)(p / 100.0 * total);

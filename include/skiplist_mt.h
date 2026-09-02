@@ -52,8 +52,22 @@ public:
         while (n) { SLNode* nx = n->forward[0]; delete n; n = nx; }
     }
 
+    static inline std::atomic<uint64_t> total_lock_wait_ns_{0};
+    static inline std::atomic<uint64_t> total_lock_acquisitions_{0};
+    static void resetLockStats() {
+        total_lock_wait_ns_.store(0);
+        total_lock_acquisitions_.store(0);
+    }
+
     void insert(Key key, const Value& value) {
-        std::unique_lock<std::shared_mutex> lk(mu_);
+        auto t0 = std::chrono::high_resolution_clock::now();
+        mu_.lock();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        total_lock_wait_ns_.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(),
+            std::memory_order_relaxed);
+        total_lock_acquisitions_.fetch_add(1, std::memory_order_relaxed);
+        std::unique_lock<std::shared_mutex> lk(mu_, std::adopt_lock);
         SLNode* update[SL_MAX_LEVEL + 1];
         SLNode* cur = head_;
         for (int i = current_level_; i >= 0; i--) {
