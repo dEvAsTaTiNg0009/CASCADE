@@ -59,6 +59,13 @@ struct Config {
     int          bytes_per_kv           = 72;
     std::string  db_path                = "./data";
     MemtableType memtable_type          = MemtableType::CSB_PLUS;
+
+    // Page-cache control for controlled experiments.
+    // Linux:  O_DIRECT | O_SYNC on SSTable file opens (requires 512-byte aligned buffers;
+    //         4KB SSTable blocks are already aligned).
+    // macOS:  fcntl(fd, F_NOCACHE, 1) applied after open() — not O_DIRECT (unsupported).
+    // When false (default), the OS page cache is used normally.
+    bool         direct_io              = false;
 };
 
 // Optimal k (number of hash functions) for a given bits-per-key budget.

@@ -172,8 +172,8 @@ int main() {
     Config base_cfg;
     base_cfg.memtable_capacity    = 4096;
     base_cfg.max_levels           = 7;
-    base_cfg.bloom_bits_per_key   = 10;            // 10 bits/key → FPR ≈ 0.83% at any scale
-    base_cfg.bloom_max_bytes      = 256ULL * 1024 * 1024; // 256MB cap (generous for 10M keys)
+    base_cfg.bloom_bits_per_key   = 14;           // 14 bits/key → FPR ≈ 0.1% at scale
+    base_cfg.bloom_max_bytes      = 256ULL * 1024 * 1024; // 256MB cap
     base_cfg.block_cache_capacity = 64ULL * 1024 * 1024;  // 64MB
 
     // -----------------------------------------------------------------------
@@ -197,7 +197,9 @@ int main() {
 
     std::vector<BenchResult> cascade_results, baseline_results;
     for (auto& wl : {workloadA(N1), workloadB(N1), workloadC(N1),
-                     workloadD(N1), workloadE(N1), workloadF(N1)}) {
+                     workloadD(N1), workloadE(N1), workloadF(N1),
+                     workloadW(N1), workloadRW(N1), workloadRSW(N1),
+                     workloadRS(N1), workloadR(N1)}) {
         std::cout << "    [CASCADE]  " << wl.name << "... " << std::flush;
         cascade_results.push_back(runWorkload(wl, cascade_cfg, 1));
         std::cout << "done\n";
@@ -346,10 +348,46 @@ int main() {
                   << " |\n";
     }
     std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
-    std::cout << "\n  Note: Skip rows use cfg.memtable_type=SKIP_LIST (concurrent SkipList with\n";
-    std::cout << "  shared_mutex, SL_MAX_LEVEL=12). CSB+ rows use ConcurrentCSBTree (OLC,\n";
-    std::cout << "  epoch-GC, cache-line aligned 64B nodes). AHLC=off forces fixed Leveling.\n";
-    std::cout << "  Adaptive Bloom uses dual-trigger structural+frequency reallocation.\n";
+    std::cout << "  Note: Skip rows use cfg.memtable_type=SKIP_LIST. CSB+ rows use ConcurrentCSBTree.\n";
+    std::cout << "  AHLC=off forces fixed Leveling. Adaptive Bloom uses dual-trigger reallocation.\n";
+
+    // -----------------------------------------------------------------------
+    // Section 4b: Ablation at N=1M (same 8 configs — second scale point)
+    // Reviewer requirement: ablation must not be confined to smallest scale.
+    // -----------------------------------------------------------------------
+    const int N4b = 1000000;
+    std::cout << "\n  [4b/4] 8-Config Ablation Study — Workload A (N=" << N4b << ", 1M scale)\n";
+    std::cout << "         Same 8 configs as Section 4a — verifies ablation is not scale-dependent\n";
+    std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
+    std::cout << "  | Config                | Tput(K/s)| WAF   | RAF   | SAF   | BlmFPR% |AHLCSw. |\n";
+    std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
+
+    auto wl_ablation_1M = workloadA(N4b);
+    for (auto& row : ablation_configs) {
+        Config cfg = base_cfg;
+        cfg.memtable_type = row.mt;
+        if (!row.ahlc_on) {
+            cfg.ahlc_write_rate_high = 1e18;
+            cfg.ahlc_skew_threshold  = 1.1;
+        }
+        if (!row.bloom_adpt)
+            cfg.bloom_total_budget = 1000000;
+
+        std::cout << "    " << row.label << "... " << std::flush;
+        auto r = runWorkload(wl_ablation_1M, cfg, 1);
+        std::cout << "done\n";
+        std::cout << "  | " << std::left  << std::setw(21) << row.label
+                  << " | " << std::right << std::setw(8)  << std::fixed
+                  << std::setprecision(1) << r.throughput_ops_sec / 1000.0
+                  << " | " << std::setw(5)  << std::setprecision(2) << r.waf
+                  << " | " << std::setw(5)  << r.raf
+                  << " | " << std::setw(5)  << r.saf
+                  << " | " << std::setw(7)  << std::setprecision(4) << r.bloom_fpr * 100
+                  << " | " << std::setw(6)  << r.ahlc_switches
+                  << " |\n";
+    }
+    std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
+    std::cout << "  Section 4b: real disk-backed I/O, N=1M (reviewer-requested second scale point)\n";
 
     return 0;
 }

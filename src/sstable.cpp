@@ -7,7 +7,19 @@
 #include <cstring>
 #include <iostream>
 
+// Static assertion: 4KB blocks are safe for O_DIRECT (requires 512-byte alignment)
+static_assert(cascade::BLOCK_SIZE % 512 == 0,
+    "BLOCK_SIZE must be 512-byte aligned for O_DIRECT compatibility");
+
 namespace cascade {
+
+// ---------------------------------------------------------------------------
+// Global direct-I/O flag — set by benchmark harness before engine construction.
+// When true: macOS applies F_NOCACHE, Linux applies O_DIRECT|O_SYNC.
+// Not thread-safe to toggle mid-run; set once before any SSTable::open() calls.
+// ---------------------------------------------------------------------------
+bool g_sstable_direct_io = false;
+
 
 std::atomic<uint64_t> SSTable::next_id_{1};
 
@@ -55,8 +67,20 @@ SSTable::SSTable(uint64_t id_, std::vector<KVPair> sorted_data, int bloom_bits)
 }
 
 std::shared_ptr<SSTable> SSTable::open(uint64_t id, const std::string& filepath) {
-    int fd = ::open(filepath.c_str(), O_RDONLY);
+#if defined(__linux__)
+    int open_flags = O_RDONLY | (g_sstable_direct_io ? (O_DIRECT | O_SYNC) : 0);
+#else
+    int open_flags = O_RDONLY;
+#endif
+    int fd = ::open(filepath.c_str(), open_flags);
     if (fd < 0) return nullptr;
+
+#if defined(__APPLE__) || defined(__MACH__)
+    // macOS: F_NOCACHE disables page cache for this file descriptor
+    if (g_sstable_direct_io) {
+        ::fcntl(fd, F_NOCACHE, 1);
+    }
+#endif
 
     off_t file_size = ::lseek(fd, 0, SEEK_END);
     if (file_size < (off_t)sizeof(SSTableFooter)) {

@@ -1,6 +1,23 @@
 #pragma once
 // =============================================================================
-// csb_tree.h — Concurrent CSB+ Tree MemTable with Optimistic Lock Coupling (OLC)
+// csb_tree.h — Concurrent CSB+ Tree MemTable with Fine-Grained Partitioning
+//
+// Concurrency Architecture (Phase II — Fine-Grained Partitioning / Per-Subtree Locking):
+// ─────────────────────────────────────────────────────────────────────────────
+// In earlier versions, a single shared_mutex covered the entire tree. Under 16
+// concurrent writer threads, this caused a lock contention bottleneck (Anomaly 1:
+// 30.36 µs avg wait/lock vs 24.02 µs for SkipList).
+//
+// This implementation uses Fine-Grained Partitioning:
+//   - The key space is partitioned across NUM_PARTITIONS (32) independent CSB+ subtrees.
+//   - Each partition is 64-byte aligned to prevent CPU cache-line false sharing.
+//   - Each partition possesses its own shared_mutex, root node, height, and node pool.
+//   - Writers lock only the targeted partition's shared_mutex, eliminating cross-thread
+//     contention for disjoint key ranges.
+//   - Readers (search) take a shared_lock on the single affected partition.
+//   - Scans read across partitions under individual shared_locks and merge-sort results.
+//   - Flush acquires partition locks in fixed monotonic order (0..N-1) preventing deadlocks,
+//     gathers all items, sort-merges, and resets all partition roots.
 // =============================================================================
 #include "common.h"
 #include "epoch.h"
@@ -9,11 +26,17 @@
 #include <functional>
 #include <thread>
 #include <shared_mutex>
+#include <memory>
+#include <algorithm>
 
 namespace cascade {
 
 static constexpr int CSB_ORDER = 15;
+static constexpr size_t NUM_PARTITIONS = 32;
 
+// ---------------------------------------------------------------------------
+// CSBNode
+// ---------------------------------------------------------------------------
 struct alignas(64) CSBNode {
     std::atomic<uint64_t> version{0};  // bit0 = 1 (locked), bit0 = 0 (unlocked)
     uint16_t numKeys  = 0;
@@ -48,10 +71,46 @@ struct alignas(64) CSBNode {
     }
 };
 
+// ---------------------------------------------------------------------------
+// CSBPartition — Single 64-byte aligned CSB+ Subtree
+// ---------------------------------------------------------------------------
+struct alignas(64) CSBPartition {
+    mutable std::shared_mutex rw_mu;
+    CSBNode*                  root{nullptr};
+    int                       height{0};
+    std::atomic<int>          count{0};
+    mutable SpinLock          alloc_lock;
+    std::vector<CSBNode*>     all_groups;
+
+    CSBPartition();
+    ~CSBPartition();
+
+    CSBPartition(const CSBPartition&) = delete;
+    CSBPartition& operator=(const CSBPartition&) = delete;
+
+    CSBNode* allocGroup(int n);
+    void     deferFreeGroup(CSBNode* g);
+    void     freeAll();
+    void     insertLeaf(CSBNode* leaf, Key key, const Value& value);
+    CSBNode* findLeaf(Key key) const;
+    void     collectAll(CSBNode* node, int depth, std::vector<KVPair>& out) const;
+
+    bool     insert(Key key, const Value& value);
+    bool     search(Key key, Value& out, bool& is_tombstone);
+    void     scan(Key start, Key end, std::vector<KVPair>& out);
+    void     flush(std::vector<KVPair>& out);
+};
+
+// ---------------------------------------------------------------------------
+// ConcurrentCSBTree — Main MemTable API
+// ---------------------------------------------------------------------------
 class ConcurrentCSBTree {
 public:
     explicit ConcurrentCSBTree();
     ~ConcurrentCSBTree();
+
+    ConcurrentCSBTree(const ConcurrentCSBTree&) = delete;
+    ConcurrentCSBTree& operator=(const ConcurrentCSBTree&) = delete;
 
     void   insert(Key key, const Value& value);
     bool   search(Key key, Value& out_value, bool& is_tombstone);
@@ -61,6 +120,7 @@ public:
     bool   isFull(int cap) const;
     int    size() const;
 
+    // Lock profiling statistics (used by Anomaly 1 benchmark)
     static inline std::atomic<uint64_t> total_lock_wait_ns_{0};
     static inline std::atomic<uint64_t> total_lock_acquisitions_{0};
     static void resetLockStats() {
@@ -69,20 +129,17 @@ public:
     }
 
 private:
-    CSBNode*              root_;
-    std::atomic<int>      count_{0};
-    int                   height_{0};
+    std::unique_ptr<CSBPartition[]> partitions_;
+    std::atomic<int>                total_count_{0};
 
-    mutable std::shared_mutex rw_mu_;      // Synchronizes concurrent writer splits
-    mutable SpinLock      alloc_lock_;
-    std::vector<CSBNode*> all_groups_;
-
-    CSBNode* allocGroup(int n);
-    void     deferFreeGroup(CSBNode* g);
-    void     insertLeaf(CSBNode* leaf, Key key, const Value& value);
-    CSBNode* findLeaf(Key key) const;
-    void     collectAll(CSBNode* node, int depth, std::vector<KVPair>& out) const;
-    void     freeAll();
+    static inline size_t getPartition(Key key) {
+        key ^= (key >> 30);
+        key *= 0xbf58476d1ce4e5b9ULL;
+        key ^= (key >> 27);
+        key *= 0x94d049bb133111ebULL;
+        key ^= (key >> 31);
+        return static_cast<size_t>(key & (NUM_PARTITIONS - 1));
+    }
 };
 
 } // namespace cascade

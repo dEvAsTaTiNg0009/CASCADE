@@ -1,0 +1,38 @@
+# CASCADE Benchmark — Workload Configuration
+# Workload: D (Standard YCSB-D: read-latest (uniform insert))
+# Scale: 5M (5,000,000 operations)
+# YCSB status: Standard YCSB workload
+#
+# These parameters are the exact values used in the benchmark harness.
+# See include/workload.h workloadD() for the C++ definition.
+
+workload_name    = D
+description      = Standard YCSB-D: read-latest (uniform insert)
+scale            = 5000000
+num_ops          = 5000000
+record_count     = 2500000
+key_space        = 10000000
+zipfian_theta    = 0.0
+
+# Operation mix (must sum to 1.0)
+read_frac        = 0.95
+update_frac      = 0.0
+insert_frac      = 0.05
+delete_frac      = 0.0
+scan_frac        = 0.0
+rmw_frac         = 0.0
+scan_length      = 100
+
+# Benchmark protocol
+repeats          = 5
+seed_base        = 42
+seed_rule        = seed_base + run_id  (same per run_id across all 11 workloads)
+load_seed        = 99                  (fixed across all runs)
+direct_io_default = false
+
+# Engine configuration (matches all rigorous_bench runs)
+memtable_capacity     = 4096
+max_levels            = 7
+bloom_bits_per_key    = 14
+bloom_max_bytes_MB    = 256
+block_cache_MB        = 64

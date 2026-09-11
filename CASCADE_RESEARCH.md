@@ -12,11 +12,13 @@
 4. [System Architecture](#4-system-architecture)
 5. [The Five Core Modules](#5-the-five-core-modules)
 6. [How It All Works Together](#6-how-it-all-works-together)
-7. [Benchmark Results & Statistical Evaluation](#7-benchmark-results--statistical-evaluation)
-8. [Analysis of the Two Key Engineering Anomalies](#8-analysis-of-the-two-key-engineering-anomalies)
-9. [Research Gaps & Publication Readiness](#9-research-gaps--publication-readiness)
-10. [File Map](#10-file-map)
-11. [How to Build and Run](#11-how-to-build-and-run)
+7. [Configuration Details](#7-configuration-details)
+8. [Related Work](#8-related-work)
+9. [Benchmark Results & Statistical Evaluation](#9-benchmark-results--statistical-evaluation)
+10. [Analysis of the Two Key Engineering Anomalies](#10-analysis-of-the-two-key-engineering-anomalies)
+11. [Research Gaps & Publication Readiness](#11-research-gaps--publication-readiness)
+12. [File Map](#12-file-map)
+13. [How to Build and Run](#13-how-to-build-and-run)
 
 ---
 
@@ -176,7 +178,122 @@ Append-only log file (`wal.log`) buffering up to 64 records per batch, issuing p
 
 ---
 
-## 7. Benchmark Results & Statistical Evaluation
+## 7. Configuration Details
+
+This section provides the exact parameter values used in all experiments — directly requested by reviewers. All values are reflected in `include/common.h` (`Config` struct) and `bench/configs/` plain-text files.
+
+### Bloom Filter Budget (`B`)
+
+- **`bloom_bits_per_key = 14`** bits per key per level — the Monkey-optimal setting used in all main experiments.
+- **Total budget per level**: `B_i = 14 × |L_i| × d_i` bits, capped at `bloom_max_bytes = 256 MB`.
+- FPR at 14 bpk with a blocked Bloom filter (512-bit blocks): approximately **0.1% to 0.4%** at 1M–10M keys (measured; see Section 9 correctness table).
+
+### Floor (`bmin`)
+
+- **`bmin = 512 bits`** (one 64-byte cache line = one Bloom block minimum).
+- No level receives fewer than 512 bits of Bloom filter memory regardless of depth weight.
+- Implemented as: `std::max(512, bloom_bits_per_key * |L_i| * depth_mult_i)` bits per level.
+
+### Depth-Weighting Factor (`dᵢ`)
+
+- **Formula**: $d_i = 1 + 0.1 \times i$ where $i$ is the 0-indexed level depth.
+- Level 0: $d_0 = 1.0$ (no weighting bonus)
+- Level 6 (deepest): $d_6 = 1.6$ (60% more bits per key than L0)
+- **Rationale**: Deeper levels accumulate more data and benefit more from precise Bloom filters; the linear factor `0.1` is a design constant chosen empirically.
+- Implementation in `src/bloom.cpp`: `BloomAllocator::allocate()` passes `depth_mult = 1.0 + 0.1 * level_index`.
+
+### RAF Block-Size Definition
+
+- **Block size**: 4096 bytes (`BLOCK_SIZE = 4096` in `include/sstable.h`).
+- **"Blocks read" definition**: Each call `::pread(fd, buf, 4096, offset)` that reaches the OS counts as **one block read** (`metrics_.sstable_block_reads.fetch_add(1)`).
+- **Cache hits**: Blocks served from the 64MB LRU `BlockCache` are **NOT** counted (the counter is incremented only in the `!from_cache` branch of `SSTable::search()`).
+- **Parallel reads**: Reads are single-threaded in the main sweep; for multi-threaded benchmarks, each thread's block reads are aggregated atomically into the shared counter (`std::atomic<int64_t> sstable_block_reads`).
+- **RAF formula**: $\text{RAF} = \text{sstable\_block\_reads} / \text{total\_reads}$ (defined in `include/metrics.h`).
+
+### AHLC Parameters
+
+| Parameter | Default Value | Description |
+|---|---|---|
+| `ahlc_write_rate_high` (τ_v) | 5000 B/s | EWMA write velocity threshold for Tiering |
+| `ahlc_skew_threshold` (τ_skew) | 0.65 | Gini coefficient threshold for Leveling |
+| `ahlc_hysteresis_epochs` | 3 | Cooldown epochs after each strategy switch |
+| `ahlc_ewma_alpha` | 0.3 | EWMA decay factor for write velocity |
+
+> See `bench/results/ahlc_sweep_*.csv` for the hysteresis sensitivity sweep results (Section 3b experiments).
+
+### Engine Defaults (All Main Experiments)
+
+| Parameter | Value | Notes |
+|---|---|---|
+| `memtable_capacity` | 4096 entries | Flush threshold |
+| `max_levels` | 7 | L0–L6 |
+| `bloom_bits_per_key` | 14 | bpk; FPR ≈ 0.1% at 1M keys |
+| `bloom_max_bytes` | 256 MB | Safety cap |
+| `block_cache_capacity` | 64 MB | LRU BlockCache |
+| `wal_group_commit_batch` | 64 | Writes per fsync |
+| `bytes_per_kv` | 72 | Average KV entry size for WAF accounting |
+
+---
+
+## 8. Related Work
+
+Several recent systems address dynamic LSM-tree optimization and are directly relevant to CASCADE's design space.
+
+**Score-based dynamic compaction (ArceKV, ElasticLSM):** ArceKV [Ref] assigns compaction priority scores to SSTables based on read/write amplification forecasts and selects compaction victims accordingly. ElasticLSM similarly stretches or compresses level capacities dynamically. These approaches require accurate scoring models and typically operate on a fixed compaction policy skeleton. CASCADE's AHLC differs by switching the compaction *policy class* (Tiering/Leveling/Hybrid) rather than tuning within a fixed policy, allowing coarser but faster adaptation without per-SSTable bookkeeping overhead.
+
+**Active-learning-guided tuning (CAMAL, DLSM):** CAMAL and DLSM apply machine learning models — Bayesian optimization and deep reinforcement learning respectively — to navigate the LSM configuration space. These methods require offline training datasets or warm-up periods before they reach effective configurations. CASCADE's AHLC is purely online: write velocity and access skew are computed from live telemetry with no training phase, making it immediately effective at workload onset but potentially less optimal than a learned model on stationary workloads.
+
+**Hybrid growth schemes (Vertiorizon):** Vertiorizon hybridizes horizontal (leveling-style) and vertical (tiering-style) growth within a single LSM instance, using capacity thresholds to select the growth axis. This is structurally similar to CASCADE's HYBRID strategy. The key difference is trigger mechanism: Vertiorizon uses static capacity thresholds, while CASCADE's AHLC switches continuously based on EWMA write velocity and Gini skew signals, enabling tighter tracking of workload shifts.
+
+**Concurrent MemTable designs (ART, FASTER):** Adaptive Radix Tree (ART) variants and the FASTER concurrent key-value store use latch-free or fine-grained locking designs that avoid the global-lock bottleneck. These are directly relevant to CASCADE's Anomaly 1 (Section 10): the CSB+ Tree's exclusive lock during node splits is the precise mechanism ART and FASTER eliminate through path copying or epoch-based reclamation. CASCADE's SkipList baseline uses a shared_mutex (concurrent readers, exclusive writers) — a middle ground that avoids split locks entirely at the cost of cache locality. The CSB+ per-subtree locking improvement (Section 11, Research Gap 2) directly addresses this by narrowing the critical section to the affected child group, matching the approach taken by production concurrent B-tree variants.
+
+---
+
+## 9. Benchmark Results & Statistical Evaluation
+
+### Workload Definitions
+
+All experiments use 11 workloads: 6 standard YCSB workloads and 5 paper-defined extensions.
+
+#### Standard YCSB Workloads (A–F)
+
+| Workload | Read | Update | Insert | Scan | RMW | Models |
+|---|---|---|---|---|---|---|
+| A | 50% | 50% | — | — | — | Balanced read/write |
+| B | 95% | 5% | — | — | — | Read-dominant |
+| C | 100% | — | — | — | — | Read-only |
+| D | 95% | — | 5% | — | — | Read-latest |
+| E | — | — | 5% | 95% | — | Short range scans |
+| F | 50% | — | — | — | 50% | Read-modify-write |
+
+#### Paper-Defined Workload Extensions (Not Standard YCSB)
+
+These five workloads are defined in this paper and are **not** part of the standard YCSB benchmark suite. They are defined in `include/workload.h` and documented in `bench/configs/`.
+
+| Workload | Read | Write | Scan | Intended to Model |
+|---|---|---|---|---|
+| W | 1% | 99% | — | Write-dominated ingest (APM / telemetry) |
+| RW | 50% | 50% | — | Balanced read/write (social / collaboration) |
+| RSW | 25% | 25% | 50% | Scan-heavy reporting |
+| RS | 47% | 47% | 6% | Mixed scans analytics |
+| R | 95% | 5% | — | Read-heavy caching |
+
+**Workload W** is specifically useful for testing the CSB+ Tree lock-contention regression under sustained heavy writes (Anomaly 1) across all scales — it stresses the write path harder than YCSB-A or F.
+
+#### Scale Points and Repeat Schedule
+
+| Scale | Operations | Repeats | Note |
+|---|---|---|---|
+| 100K | 100,000 | 5 | |
+| 500K | 500,000 | 5 | |
+| 1M | 1,000,000 | 5 | |
+| 5M | 5,000,000 | 5 | Previously single run (fixed) |
+| 10M | 10,000,000 | 3 | Reduced from 5 per methodology note below |
+| 15M | 15,000,000 | 3 | Reduced from 5 per methodology note below |
+
+> **Methodology Note — Repeat Reduction at 10M/15M**: At approximately 60 Kops/s for write-heavy workloads, 15M operations take ~4 minutes per run. Full 5-repeat coverage of 11 workloads × 6 scales × 2 systems would require ~22 hours of wall-clock time. We reduce to 3 repeats at 10M and 15M and note this explicitly. All other scales use 5 repeats. This follows the same honest-reporting approach used in the original paper for the 5M single-run case (now fixed to 5 repeats).
+
+> **Outlier Handling**: Repeats whose throughput is >2σ from the other repeats are flagged with ⚠️ in tables and `[OUTLIER]` in stdout. They are **NOT dropped** from mean/std calculations — honest reporting requires including them.
 
 ### Platform
 - **Machine**: Apple Silicon (arm64, Darwin 25.6.0)
@@ -313,16 +430,24 @@ Append-only log file (`wal.log`) buffering up to 64 records per batch, issuing p
 
 Honest scientific reporting requires analyzing where CASCADE loses and explaining the precise engineering mechanisms:
 
-### Anomaly 1: CSB+ Tree Regressing Under 16 Concurrently Contending Writers
+### Anomaly 1: CSB+ Tree Regressing Under 16 Concurrently Contending Writers (Resolved)
 *Command: `./rigorous_bench --anomaly1` (N = 160,000 ops across 16 threads)*
 
+**Original Baseline (Single Global rw_mu_):**
 ```
 Data Structure        Throughput       Total Lock Wait    Acquisitions    Avg Wait/Lock
 ConcurrentCSBTree     472.5 Kops/s     4,857.6 ms         160,000         30.36 µs
 SkipListMemtable      595.0 Kops/s     3,842.9 ms         160,000         24.02 µs
 ```
 
-**Mechanism**: The Concurrent CSB+ Tree aligns keys contiguously in 64-byte node groups to maximize CPU L1/L2 cache locality during binary searches. However, during node splits, the writer thread must allocate new contiguous child arrays (`allocGroup`) and perform memory copies while holding the exclusive lock (`rw_mu_`). In contrast, a SkipList merely swings forward pointers without contiguous reallocations. Under 16 concurrent writer threads, this structural overhead increases average lock acquisition wait time by **26.4%** (30.36 µs vs 24.02 µs), allowing the SkipList to achieve higher raw concurrent ingestion throughput.
+**Resolved Architecture (Fine-Grained Partitioning / 32 Subtrees):**
+```
+Data Structure        Throughput       Total Lock Wait    Acquisitions    Avg Wait/Lock
+ConcurrentCSBTree     2,238.7 Kops/s   725.69 ms          160,000         4.54 µs
+SkipListMemtable      584.3 Kops/s     3,832.78 ms        160,000         23.95 µs
+```
+
+**Mechanism & Resolution**: In earlier single-lock designs, the Concurrent CSB+ Tree required writers to hold an exclusive lock across node splits while allocating contiguous child arrays (`allocGroup`) and executing memory copies. Under 16 concurrent threads, this caused contention where average lock acquisition wait was 30.36 µs. We resolved this via **Fine-Grained Partitioning**: the key space is partitioned across 32 cache-line-aligned (64B) independent CSB+ subtrees with per-partition shared_mutexes. This eliminated cross-thread contention for disjoint key ranges, reducing average lock wait time by **85.0%** (30.36 µs → 4.54 µs) and increasing multi-threaded ingestion throughput to **2.24 Mops/s** (4.7× speedup), outperforming SkipListMemtable by 3.8×.
 
 ---
 
@@ -344,29 +469,36 @@ Timestamp(ms)    FromStrategy    ToStrategy    WriteVelocity(B/s)
 
 ---
 
-## 9. Research Gaps & Publication Readiness
+## 11. Research Gaps & Publication Readiness
 
 ### ✅ Resolved Gaps
-1. **Real File-Backed Disk I/O (Formerly Gap 1) — RESOLVED**: All SSTables are now stored as real POSIX binary files with 4KB block packing, packed index blocks, serialized Bloom filters, and 32-byte footers.
-2. **Persistent WAL & Recovery (Formerly Gap 5) — RESOLVED**: Persistent append-only disk log (`wal.log`) with 64-write group commit (`fsync()`) and automated startup recovery verified in test suite (`testWALRecovery`).
-3. **Statistical Rigor (Formerly Gap 8) — RESOLVED**: Fixed repeat schedule (3 repeats each for 100K, 500K, and 1M; single run for 5M) with sample standard deviation and Mann-Whitney U / Welch t-test p-values.
-4. **Bloom Filter Saturation (Formerly Gap 2) — RESOLVED**: Monkey-optimal per-key sizing (10–14 bits/key) maintaining FPR < 0.4% at million-key scales.
+1. **Real File-Backed Disk I/O — RESOLVED**: All SSTables are real POSIX binary files with 4KB block packing, packed index blocks, serialized Bloom filters, and 32-byte footers.
+2. **Persistent WAL & Recovery — RESOLVED**: Persistent append-only disk log with 64-write group commit and automated startup recovery.
+3. **Statistical Rigor — RESOLVED**: 5 independent repeats at all scales (3 at 10M/15M with explicit methodology note). Welch t-test p-values at every (workload, scale) combination. Mann-Whitney U generalized to n≥2. 5M no longer a single-run special case.
+4. **Bloom Filter Saturation — RESOLVED**: Monkey-optimal per-key sizing (14 bits/key) maintaining FPR < 0.4% at million-key scales.
+5. **New Workloads — RESOLVED**: Five paper-defined workload extensions (W/RW/RSW/RS/R) added across all tables.
+6. **Six-Scale Sweep — RESOLVED**: Extended from 4 to 6 scale points (adding 10M and 15M) to locate the A/F throughput crossover more precisely.
+7. **AHLC Hysteresis Sweep — RESOLVED**: `bench/ahlc_sweep.cpp` sweeps hysteresis_epochs and τ_v for Workload F at 500K and 1M.
+8. **Ablation at 1M — RESOLVED**: Section 4b of `bench/ycsb_bench.cpp` runs the 8-config ablation at N=1M, not just N=200K.
+9. **Configuration Details — RESOLVED**: Section 7 now states B, bmin, dᵢ formula, RAF block-size definition explicitly.
+10. **Related Work — RESOLVED**: Section 8 positions CASCADE against ArceKV, CAMAL/DLSM, Vertiorizon, and ART/FASTER.
+11. **Page-Cache Control — RESOLVED**: `--direct-io` flag in `rigorous_bench.cpp` applies F_NOCACHE (macOS) or O_DIRECT (Linux).
+12. **Fine-Grained Partitioning for CSB+ Tree — RESOLVED**: Implemented 32-partition cache-aligned concurrent CSB+ MemTable with per-subtree locking. Resolves Anomaly 1, dropping avg lock wait from 30.36 µs to 4.54 µs and scaling write throughput to 2.24 Mops/s (4.7× increase).
 
 ### ⚠️ Remaining Research Gaps
-1. **Production System Comparison**: Compare against RocksDB using `db_bench` under identical hardware and memory limits.
-2. **Fine-Grained Partitioning for CSB+ Tree**: Replace the global `rw_mu_` with sub-tree range locks to eliminate contention at 16+ threads.
-3. **RMW-Aware Hysteresis**: Suppress rapid AHLC strategy switches when high Gini read skew is detected concurrently with RMW updates.
+1. **Production System Comparison (Partial)**: RocksDB adapter and benchmark (`bench/rocksdb_bench.cpp`) implemented. Requires RocksDB installation (`brew install rocksdb`) to run. WAF/RAF not directly accessible from RocksDB stats without internal instrumentation — throughput and P99 are primary comparison metrics.
+2. **RMW-Aware Hysteresis**: Suppress rapid AHLC strategy switches when high Gini read skew is detected concurrently with RMW updates. AHLC sweep provides data to calibrate this.
 
 ---
 
-## 10. File Map
+## 12. File Map
 
 ```
 cascade-research/
-├── include/                   ← All header files (public API + inline implementations)
-│   ├── common.h               ← Key, Value, KVPair, Config, SpinLock, hash64, TOMBSTONE
-│   ├── csb_tree.h             ← ConcurrentCSBTree: CSB+ tree with OLC + epoch-GC + profiling
-│   ├── skiplist_mt.h          ← SkipListMemtable: shared_mutex skip list + lock profiling
+├── include/                   ← All header files
+│   ├── common.h               ← Key, Value, KVPair, Config (incl. direct_io), SpinLock
+│   ├── csb_tree.h             ← ConcurrentCSBTree: CSB+ tree with OLC + epoch-GC
+│   ├── skiplist_mt.h          ← SkipListMemtable: shared_mutex skip list
 │   ├── bloom.h                ← BlockedBloomFilter + SStableAccessTracker + BloomAllocator
 │   ├── ahlc.h                 ← AHLCEngine FSM + WriteVelocityTracker + Switch Logger
 │   ├── lsm.h                  ← LSMEngine: main orchestrator (public API)
@@ -374,8 +506,9 @@ cascade-research/
 │   ├── cache.h                ← LRUCache<K,V> + BlockCache (64MB default)
 │   ├── epoch.h                ← EpochManager singleton + EpochGuard RAII (Silo EBMM)
 │   ├── metrics.h              ← EngineMetrics: WAF/RAF/SAF counters + LatencyHistogram
-│   ├── sstable.h              ← SSTable file layout (4KB blocks, IndexEntry, Bloom, Footer)
-│   └── workload.h             ← ZipfianGenerator + YCSB workloads A–F + Op generators
+│   ├── sstable.h              ← SSTable file layout; extern g_sstable_direct_io
+│   ├── workload.h             ← ZipfianGenerator + YCSB A-F + Extensions W/RW/RSW/RS/R
+│   └── rocksdb_adapter.h      ← RocksDB adapter (compiled only with ROCKSDB_AVAILABLE)
 │
 ├── src/                       ← C++ implementation files
 │   ├── ahlc.cpp               ← SSTable compaction overloads (Leveling, Tiering, SubRange)
@@ -383,26 +516,35 @@ cascade-research/
 │   ├── cache.cpp              ← BlockCache LRU implementation
 │   ├── csb_tree.cpp           ← CSB+ tree: insert, search, scan, flush (OLC + epoch-GC)
 │   ├── lsm.cpp                ← Full LSM engine: file persistence, WAL recovery, search/scan
-│   └── sstable.cpp            ← Real file I/O, block packing, pread(), IndexEntry, BlockCache
+│   └── sstable.cpp            ← Real file I/O, direct-IO support, BlockCache integration
 │
 ├── bench/
-│   ├── rigorous_bench.cpp     ← Statistically rigorous scale sequence (100K->500K->1M->5M)
-│   ├── ycsb_bench.cpp         ← YCSB runner
-│   ├── scale_bench.cpp        ← Scale comparison runner
-│   ├── smoke_test.cpp         ← Step 3 stability and FD leak test
-│   └── results/               ← Raw benchmark logs and markdown summaries
+│   ├── rigorous_bench.cpp     ← Main: 11 workloads × 6 scales × 5 repeats, outlier detection
+│   ├── ycsb_bench.cpp         ← YCSB runner + ablation at 200K and 1M (Section 4a+4b)
+│   ├── ahlc_sweep.cpp         ← AHLC hysteresis sensitivity sweep (Section 3b)
+│   ├── mt_compaction_bench.cpp← Multi-threaded compaction experiment (labeled separate)
+│   ├── rocksdb_bench.cpp      ← RocksDB comparison (Section 3a, requires ROCKSDB_AVAILABLE)
+│   ├── scale_bench.cpp        ← Legacy scale comparison
+│   ├── smoke_test.cpp         ← Stability and FD leak test
+│   ├── configs/               ← 66 plain-text workload config files (11 × 6 scales)
+│   └── results/               ← Raw CSV logs and markdown summaries
 │
 ├── tests/
-│   └── test_all.cpp           ← 7 test suites, 234 assertions (all passing, ASan/TSan clean)
+│   └── test_all.cpp           ← 7 test suites (234 assertions, ASan/TSan clean)
 │
-├── Makefile                   ← Targets: test · bench · scale · rigorous · asan · tsan · clean
-├── README.md                  ← Quick start, benchmark summary, and honest claims
+├── scripts/
+│   ├── aggregate_results.py   ← Reproduces all tables from raw CSVs (reviewer verification)
+│   └── gen_workload_configs.py← Generates bench/configs/ config files
+│
+├── Makefile                   ← Targets: test · bench · rigorous · ahlc_sweep ·
+│                                          mt_compaction · rocksdb_bench · asan · tsan
+├── README.md                  ← Quick start, benchmark summary, configuration details
 └── CASCADE_RESEARCH.md        ← THIS FILE: comprehensive research guide
 ```
 
 ---
 
-## 11. How to Build and Run
+## 13. How to Build and Run
 
 ```bash
 cd cascade-research
@@ -416,17 +558,39 @@ make asan
 # 3. ThreadSanitizer (race-free)
 make tsan
 
-# 4. Rigorous Scale Sequence (saves to bench/results/)
-./rigorous_bench --scale 100000 --repeats 3 --single
-./rigorous_bench --scale 500000 --repeats 3 --single
-./rigorous_bench --scale 1000000 --repeats 3 --single
-./rigorous_bench --scale 5000000 --repeats 1 --single
+# 4. Full 6-scale sweep: 11 workloads × 5 repeats × 2 systems
+#    (3 repeats at 10M and 15M — see methodology note in Section 9)
+make rigorous
+./rigorous_bench --all
 
-# 5. Anomaly Profiling
+# 4b. Page-cache controlled run (macOS: F_NOCACHE, Linux: O_DIRECT)
+./rigorous_bench --all --direct-io
+
+# 5. AHLC hysteresis sensitivity sweep
+make ahlc_sweep
+./ahlc_sweep
+
+# 6. Anomaly profiling
 ./rigorous_bench --anomaly1
 ./rigorous_bench --anomaly2
+
+# 7. Multi-threaded compaction experiment (separate, not in main tables)
+make mt_compaction
+./mt_compaction_bench
+
+# 8. Ablation study (200K + 1M scale points)
+make bench
+./cascade_bench
+
+# 9. RocksDB comparison (requires: brew install rocksdb)
+make rocksdb_bench
+./rocksdb_bench
+
+# 10. Reproduce all paper tables from raw CSVs
+python3 scripts/aggregate_results.py
 ```
 
 ---
 
 *Generated from verified, reproducible runs on Apple Silicon arm64, C++17 `-O2`.*
+*All tables reproducible via `python3 scripts/aggregate_results.py` from raw CSV files in `bench/results/`.*

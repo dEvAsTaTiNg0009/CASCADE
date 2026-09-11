@@ -28,6 +28,11 @@
 
 namespace cascade {
 
+// Global direct-I/O control flag. Set to true before constructing any LSMEngine
+// to bypass the OS page cache (macOS: F_NOCACHE, Linux: O_DIRECT|O_SYNC).
+// Affects all SSTable::open() calls made after the flag is set.
+extern bool g_sstable_direct_io;
+
 static constexpr uint64_t SSTABLE_MAGIC = 0xCA5CADE0F11EULL;
 static constexpr int BLOCK_SIZE = 4096;
 

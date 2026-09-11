@@ -5,6 +5,9 @@ cascade_asan
 cascade_tsan
 scale_bench
 rigorous_bench
+ahlc_sweep
+mt_compaction_bench
+rocksdb_bench
 test_asan
 test_tsan
 *.o

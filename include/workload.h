@@ -1,6 +1,18 @@
 #pragma once
 // =============================================================================
 // workload.h — YCSB Workload Generators + Scrambled Zipfian Distribution
+//
+// Standard YCSB workloads: A, B, C, D, E, F
+// Paper-defined workload extensions (not part of standard YCSB spec):
+//   W   (1R/99W)       — write-dominated ingest (APM/telemetry)
+//   RW  (50R/50W)      — balanced read/write (social/collaboration)
+//   RSW (25R/25W/50S)  — scan-heavy reporting; scan_length matches Workload E
+//   RS  (47R/47W/6S)   — mixed scans analytics; scan_length matches Workload E
+//   R   (95R/5W)       — read-heavy caching
+//
+// Seed discipline: generateOps(cfg, seed) accepts an explicit seed.
+// The benchmark harness passes seed = BASE_SEED + run_id (same seed per
+// run number across all 11 workloads) so cross-workload comparisons stay valid.
 // =============================================================================
 #include "common.h"
 #include <vector>
@@ -117,6 +129,70 @@ inline YCSBWorkloadConfig workloadF(int ops = 100000) {
     YCSBWorkloadConfig c;
     c.name = "F(50R/50RMW)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
     c.read_frac = 0.5; c.rmw_frac = 0.5;
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// Paper-defined workload extensions — NOT part of the standard YCSB spec.
+// Defined explicitly here and in the paper's methodology section.
+// All use zipfian_theta=0.99 and same key_space/record_count conventions as A–F.
+// RSW and RS set scan_length=100 to match Workload E's scan settings.
+// ---------------------------------------------------------------------------
+
+// W: Write-dominated ingest — models APM/telemetry pipelines.
+// 1% reads, 99% updates. Stresses the write path harder than A or F.
+inline YCSBWorkloadConfig workloadW(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    YCSBWorkloadConfig c;
+    c.name = "W(1R/99W)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
+    c.zipfian_theta = 0.99;
+    c.read_frac = 0.01; c.update_frac = 0.99;
+    return c;
+}
+
+// RW: Balanced read/write — models social/collaboration systems.
+// 50% reads, 50% updates (writes only, no RMW).
+inline YCSBWorkloadConfig workloadRW(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    YCSBWorkloadConfig c;
+    c.name = "RW(50R/50W)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
+    c.zipfian_theta = 0.99;
+    c.read_frac = 0.50; c.update_frac = 0.50;
+    return c;
+}
+
+// RSW: Scan-heavy reporting — 25% reads, 25% writes, 50% scans.
+// scan_length=100 matches Workload E for consistency.
+inline YCSBWorkloadConfig workloadRSW(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    YCSBWorkloadConfig c;
+    c.name = "RSW(25R/25W/50S)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
+    c.zipfian_theta = 0.99;
+    c.read_frac = 0.25; c.update_frac = 0.25; c.scan_frac = 0.50;
+    c.scan_length = 100; // matches Workload E
+    return c;
+}
+
+// RS: Mixed scans analytics — 47% reads, 47% writes, 6% scans.
+// scan_length=100 matches Workload E for consistency.
+inline YCSBWorkloadConfig workloadRS(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    YCSBWorkloadConfig c;
+    c.name = "RS(47R/47W/6S)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
+    c.zipfian_theta = 0.99;
+    c.read_frac = 0.47; c.update_frac = 0.47; c.scan_frac = 0.06;
+    c.scan_length = 100; // matches Workload E
+    return c;
+}
+
+// R: Read-heavy caching — 95% reads, 5% writes.
+// Models a caching tier where writes are rare updates.
+inline YCSBWorkloadConfig workloadR(int ops = 100000) {
+    uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
+    YCSBWorkloadConfig c;
+    c.name = "R(95R/5W)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
+    c.zipfian_theta = 0.99;
+    c.read_frac = 0.95; c.update_frac = 0.05;
     return c;
 }
 
