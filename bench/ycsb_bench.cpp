@@ -14,6 +14,7 @@
 #include "../include/lsm.h"
 #include "../include/workload.h"
 #include <iostream>
+#include <fstream>
 #include <thread>
 #include <vector>
 #include <chrono>
@@ -157,7 +158,14 @@ void printRUMTable(const std::vector<BenchResult>& results) {
 // ---------------------------------------------------------------------------
 // MAIN
 // ---------------------------------------------------------------------------
-int main() {
+int main(int argc, char** argv) {
+    bool only_ablation = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--ablation") {
+            only_ablation = true;
+        }
+    }
+
     std::cout << "\n";
     std::cout << "  +==============================================================+\n";
     std::cout << "  |  CASCADE Research Engine — Full YCSB Benchmark Suite         |\n";
@@ -176,16 +184,6 @@ int main() {
     base_cfg.bloom_max_bytes      = 256ULL * 1024 * 1024; // 256MB cap
     base_cfg.block_cache_capacity = 64ULL * 1024 * 1024;  // 64MB
 
-    // -----------------------------------------------------------------------
-    // Section 1: YCSB Workloads A–F
-    // CASCADE (CSB+ + AHLC + Adaptive Bloom) vs Baseline (SkipList + Fixed-Leveling + Uniform)
-    // N=1,000,000 ops — production-scale benchmark
-    // -----------------------------------------------------------------------
-    const int N1 = 10000000;
-    std::cout << "\n  [1/4] YCSB Workloads A-F — N=" << N1 << " ops (10M scale)\n";
-    std::cout << "        Comparing CASCADE (CSB+·AHLC·AdaptBloom) vs Baseline (SkipList·Leveling·Uniform)\n";
-    std::cout << "        Bloom: " << base_cfg.bloom_bits_per_key << " bits/key (Monkey-optimal per-level sizing)\n";
-
     Config cascade_cfg = base_cfg;
     cascade_cfg.memtable_type = MemtableType::CSB_PLUS;
 
@@ -193,25 +191,35 @@ int main() {
     baseline_cfg.memtable_type        = MemtableType::SKIP_LIST;
     baseline_cfg.ahlc_write_rate_high = 1e18;  // force Leveling always
     baseline_cfg.ahlc_skew_threshold  = 1.1;
-    // Same bloom_bits_per_key — fair comparison: only compaction & memtable differ
 
-    std::vector<BenchResult> cascade_results, baseline_results;
-    for (auto& wl : {workloadA(N1), workloadB(N1), workloadC(N1),
-                     workloadD(N1), workloadE(N1), workloadF(N1),
-                     workloadW(N1), workloadRW(N1), workloadRSW(N1),
-                     workloadRS(N1), workloadR(N1)}) {
-        std::cout << "    [CASCADE]  " << wl.name << "... " << std::flush;
-        cascade_results.push_back(runWorkload(wl, cascade_cfg, 1));
-        std::cout << "done\n";
-        std::cout << "    [Baseline] " << wl.name << "... " << std::flush;
-        baseline_results.push_back(runWorkload(wl, baseline_cfg, 1));
-        std::cout << "done\n";
-    }
+    if (!only_ablation) {
+        // -----------------------------------------------------------------------
+        // Section 1: YCSB Workloads A–F
+        // CASCADE (CSB+ + AHLC + Adaptive Bloom) vs Baseline (SkipList + Fixed-Leveling + Uniform)
+        // N=200,000 ops
+        // -----------------------------------------------------------------------
+        const int N1 = 200000;
+        std::cout << "\n  [1/4] YCSB Workloads A-F — N=" << N1 << " ops\n";
+        std::cout << "        Comparing CASCADE (CSB+·AHLC·AdaptBloom) vs Baseline (SkipList·Leveling·Uniform)\n";
+        std::cout << "        Bloom: " << base_cfg.bloom_bits_per_key << " bits/key (Monkey-optimal per-level sizing)\n";
 
-    std::cout << "\n  -- CASCADE (CSB+ · AHLC · Adaptive Bloom) --";
-    printRUMTable(cascade_results);
-    std::cout << "\n  -- Baseline (SkipList · Fixed-Leveling · Uniform Bloom) --";
-    printRUMTable(baseline_results);
+        std::vector<BenchResult> cascade_results, baseline_results;
+        for (auto& wl : {workloadA(N1), workloadB(N1), workloadC(N1),
+                         workloadD(N1), workloadE(N1), workloadF(N1),
+                         workloadW(N1), workloadRW(N1), workloadRSW(N1),
+                         workloadRS(N1), workloadR(N1)}) {
+            std::cout << "    [CASCADE]  " << wl.name << "... " << std::flush;
+            cascade_results.push_back(runWorkload(wl, cascade_cfg, 1));
+            std::cout << "done\n";
+            std::cout << "    [Baseline] " << wl.name << "... " << std::flush;
+            baseline_results.push_back(runWorkload(wl, baseline_cfg, 1));
+            std::cout << "done\n";
+        }
+
+        std::cout << "\n  -- CASCADE (CSB+ · AHLC · Adaptive Bloom) --";
+        printRUMTable(cascade_results);
+        std::cout << "\n  -- Baseline (SkipList · Fixed-Leveling · Uniform Bloom) --";
+        printRUMTable(baseline_results);
 
     // Head-to-head summary
     std::cout << "\n  Head-to-head (YCSB-A):\n";
@@ -290,7 +298,8 @@ int main() {
                   << " | " << std::setw(6)  << r.ahlc_switches
                   << " |\n";
     }
-    std::cout << "  +-------+----------+-------+-------+--------+\n";
+        std::cout << "  +-------+----------+-------+-------+--------+\n";
+    }
 
     // -----------------------------------------------------------------------
     // Section 4: Full 8-config ablation — Workload A, N=200,000
@@ -312,6 +321,16 @@ int main() {
         std::string label;
     };
 
+    struct AblationEntry {
+        std::string label;
+        double tput_kops;
+        double waf;
+        double raf;
+        double saf;
+        double bloom_fpr_pct;
+        int ahlc_switches;
+    };
+
     std::vector<AblRow> ablation_configs = {
         {MemtableType::SKIP_LIST, false, false, "Skip|Leveling|Unif  "},
         {MemtableType::SKIP_LIST, false, true,  "Skip|Leveling|Adpt  "},
@@ -322,6 +341,8 @@ int main() {
         {MemtableType::CSB_PLUS,  true,  false, "CSB+|AHLC    |Unif  "},
         {MemtableType::CSB_PLUS,  true,  true,  "CSB+|AHLC    |Adpt \u2190CASCADE"},
     };
+
+    std::vector<AblationEntry> entries_200K, entries_1M;
 
     auto wl_ablation = workloadA(N4);
     for (auto& row : ablation_configs) {
@@ -337,13 +358,17 @@ int main() {
         std::cout << "    " << row.label << "... " << std::flush;
         auto r = runWorkload(wl_ablation, cfg, 1);
         std::cout << "done\n";
+        double tput_k = r.throughput_ops_sec / 1000.0;
+        double fpr_pct = r.bloom_fpr * 100.0;
+        entries_200K.push_back({row.label, tput_k, r.waf, r.raf, r.saf, fpr_pct, r.ahlc_switches});
+
         std::cout << "  | " << std::left  << std::setw(21) << row.label
                   << " | " << std::right << std::setw(8)  << std::fixed
-                  << std::setprecision(1) << r.throughput_ops_sec / 1000.0
+                  << std::setprecision(1) << tput_k
                   << " | " << std::setw(5)  << std::setprecision(2) << r.waf
                   << " | " << std::setw(5)  << r.raf
                   << " | " << std::setw(5)  << r.saf
-                  << " | " << std::setw(7)  << std::setprecision(4) << r.bloom_fpr * 100
+                  << " | " << std::setw(7)  << std::setprecision(4) << fpr_pct
                   << " | " << std::setw(6)  << r.ahlc_switches
                   << " |\n";
     }
@@ -376,18 +401,71 @@ int main() {
         std::cout << "    " << row.label << "... " << std::flush;
         auto r = runWorkload(wl_ablation_1M, cfg, 1);
         std::cout << "done\n";
+        double tput_k = r.throughput_ops_sec / 1000.0;
+        double fpr_pct = r.bloom_fpr * 100.0;
+        entries_1M.push_back({row.label, tput_k, r.waf, r.raf, r.saf, fpr_pct, r.ahlc_switches});
+
         std::cout << "  | " << std::left  << std::setw(21) << row.label
                   << " | " << std::right << std::setw(8)  << std::fixed
-                  << std::setprecision(1) << r.throughput_ops_sec / 1000.0
+                  << std::setprecision(1) << tput_k
                   << " | " << std::setw(5)  << std::setprecision(2) << r.waf
                   << " | " << std::setw(5)  << r.raf
                   << " | " << std::setw(5)  << r.saf
-                  << " | " << std::setw(7)  << std::setprecision(4) << r.bloom_fpr * 100
+                  << " | " << std::setw(7)  << std::setprecision(4) << fpr_pct
                   << " | " << std::setw(6)  << r.ahlc_switches
                   << " |\n";
     }
     std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
     std::cout << "  Section 4b: real disk-backed I/O, N=1M (reviewer-requested second scale point)\n";
+
+    // Write results to bench/results/ablation_summary.md
+    (void)system("mkdir -p bench/results");
+    std::ofstream out("bench/results/ablation_summary.md");
+    if (out.is_open()) {
+        out << "# CASCADE Architectural Ablation Study (8 Configurations)\n\n";
+        out << "> Evaluates {SkipList / CSB+} × {Fixed Leveling / AHLC} × {Uniform / Adaptive Bloom} on Workload A (50% Read / 50% Update).\n\n";
+
+        out << "### 1. Ablation Study: 200,000 Operations (200K Scale)\n\n";
+        out << "| MemTable | Compaction | Bloom Sizing | Throughput (Kops/s) | WAF | RAF | SAF | Bloom FPR (%) | AHLC Switches |\n";
+        out << "|---|---|---|:---:|:---:|:---:|:---:|:---:|:---:|\n";
+        for (const auto& e : entries_200K) {
+            std::string raw = e.label;
+            while (!raw.empty() && raw.back() == ' ') raw.pop_back();
+            // parse tokens
+            std::string mt = raw.find("Skip") != std::string::npos ? "SkipList" : "CSB+ Tree";
+            std::string comp = raw.find("AHLC") != std::string::npos ? "AHLC" : "Fixed Leveling";
+            std::string blm = raw.find("Adpt") != std::string::npos ? "Adaptive (Dual-Trigger)" : "Uniform";
+            if (raw.find("CASCADE") != std::string::npos) blm += " *(CASCADE)*";
+            out << "| " << mt << " | " << comp << " | " << blm << " | "
+                << std::fixed << std::setprecision(1) << e.tput_kops << " | "
+                << std::setprecision(2) << e.waf << " | "
+                << std::setprecision(2) << e.raf << " | "
+                << std::setprecision(2) << e.saf << " | "
+                << std::setprecision(4) << e.bloom_fpr_pct << "% | "
+                << e.ahlc_switches << " |\n";
+        }
+
+        out << "\n### 2. Ablation Study: 1,000,000 Operations (1M Scale)\n\n";
+        out << "| MemTable | Compaction | Bloom Sizing | Throughput (Kops/s) | WAF | RAF | SAF | Bloom FPR (%) | AHLC Switches |\n";
+        out << "|---|---|---|:---:|:---:|:---:|:---:|:---:|:---:|\n";
+        for (const auto& e : entries_1M) {
+            std::string raw = e.label;
+            while (!raw.empty() && raw.back() == ' ') raw.pop_back();
+            std::string mt = raw.find("Skip") != std::string::npos ? "SkipList" : "CSB+ Tree";
+            std::string comp = raw.find("AHLC") != std::string::npos ? "AHLC" : "Fixed Leveling";
+            std::string blm = raw.find("Adpt") != std::string::npos ? "Adaptive (Dual-Trigger)" : "Uniform";
+            if (raw.find("CASCADE") != std::string::npos) blm += " *(CASCADE)*";
+            out << "| " << mt << " | " << comp << " | " << blm << " | "
+                << std::fixed << std::setprecision(1) << e.tput_kops << " | "
+                << std::setprecision(2) << e.waf << " | "
+                << std::setprecision(2) << e.raf << " | "
+                << std::setprecision(2) << e.saf << " | "
+                << std::setprecision(4) << e.bloom_fpr_pct << "% | "
+                << e.ahlc_switches << " |\n";
+        }
+        out.close();
+        std::cout << "\nSaved: bench/results/ablation_summary.md\n";
+    }
 
     return 0;
 }
