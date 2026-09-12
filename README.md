@@ -59,7 +59,7 @@
 # 1. Clean build + test suite (234 passed, 0 failed — ASan/TSan verified)
 make clean && make test
 
-# 2. Full 6-scale sweep (11 workloads × 5 repeats × 2 systems)
+# 2. Full 6-scale sweep (11 workloads × 3/5 repeats × 2 systems)
 #    3 repeats at 10M and 15M — see methodology note in CASCADE_RESEARCH.md Section 9
 make rigorous && ./rigorous_bench --all
 
