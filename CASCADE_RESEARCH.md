@@ -451,11 +451,18 @@ SkipListMemtable      584.3 Kops/s     3,832.78 ms        160,000         23.95 
 
 ---
 
-### Anomaly 2: Workload F (Read-Modify-Write) Strategy Thrashing
-*Command: `./rigorous_bench --anomaly2` (N = 100,000 ops, Workload F)*
+### Anomaly 2: Workload F (Read-Modify-Write) Strategy Thrashing (Partially Mitigated)
+*Commands: `./rigorous_bench --anomaly2` & `./ahlc_sweep` (N = 500K & 1M)*
+
+**Baseline Thrashing (Unmitigated, $h = 0$):**
+```
+Configuration         Scale    Hysteresis (h)    Switches    Throughput       WAF
+Unmitigated (h=0)     500K     0 epochs          71          569.4 Kops/s     7.17
+Unmitigated (h=0)     1M       0 epochs          174         367.8 Kops/s     11.80
+```
 
 ```
-# Workload F Strategy Switches (First 64 ms)
+# Workload F Strategy Switches Under Baseline (First 64 ms)
 Timestamp(ms)    FromStrategy    ToStrategy    WriteVelocity(B/s)
 12.57 ms         HYBRID          TIERING       15.07 MB/s
 20.24 ms         TIERING         HYBRID        16.27 MB/s
@@ -465,7 +472,20 @@ Timestamp(ms)    FromStrategy    ToStrategy    WriteVelocity(B/s)
 64.10 ms         TIERING         HYBRID        16.93 MB/s
 ```
 
-**Mechanism**: In Workload F (50% Read, 50% RMW), user transactions continuously alternate between read probes and atomic write updates. The EWMA write velocity tracker experiences rapid oscillations around the high-rate threshold. This causes AHLC to thrash between `HYBRID` and `TIERING` (6 strategy switches in under 65 ms). When switching from Tiering back to Leveling, AHLC triggers cascading merges of accumulated runs, rewriting keys repeatedly compared to the steady, monotonic merge progression of fixed leveling.
+**Mitigated Architecture (Hysteresis Sweep / Cooldown Epochs):**
+```
+Configuration         Scale    Hysteresis (h)    Switches    Throughput       WAF
+Default Hysteresis    500K     3 epochs          21 (-70.4%) 560.5 Kops/s     7.93
+Optimal Hysteresis    500K     8 epochs          10 (-85.9%) 632.6 Kops/s     5.45
+Default Hysteresis    1M       3 epochs          43 (-75.3%) 369.2 Kops/s     12.42
+Optimal Hysteresis    1M       8 epochs          21 (-87.9%) 369.9 Kops/s     11.44
+```
+
+**Mechanism & Mitigation**: In Workload F (50% Read, 50% RMW), user transactions continuously alternate between read probes and atomic write updates. Without cooldown hysteresis ($h = 0$), the EWMA write velocity tracker flutters around the threshold $\tau_v$, causing AHLC to thrash between `HYBRID` and `TIERING` (6 strategy switches in under 65 ms; 71 switches at 500K; 174 switches at 1M). Every premature transition from Tiering back to Leveled triggers cascading merges of uncompacted runs, increasing WAF.
+
+To resolve this, we executed an exhaustive parameter sweep (`./ahlc_sweep`, sweeping $h \in \{0, 1, 2, 3, 5, 8\}$ and $\tau_v \in [5000, 50000]$ B/s; results in `bench/results/ahlc_sweep_*.csv`). Introducing a hysteresis cooldown of $h \ge 3$ epochs (the engine default) reduces thrashing switches by **70.4%–75.3%**, and $h = 8$ epochs suppresses switches by **85.9%–87.9%** (down to 10 switches at 500K and 21 at 1M). At 500K, $h = 8$ lowers WAF from 7.17 to 5.45 while boosting throughput from 569.4 to 632.6 Kops/s (+11.1%). Crucially, the control sweep on Workloads A and B at 1M confirmed that widening hysteresis does **not** degrade throughput on workloads requiring rapid adaptation (Workload A maintains 370–383 Kops/s across all $h \ge 1$; Workload B stays >1.2 Mops/s with <8% variance across $h \in [0, 8]$).
+
+**Why Designated "Partially Mitigated"**: While hysteresis successfully suppresses ~88% of rapid thrashing switches without sluggishness penalties, RMW workloads naturally oscillate between read and write dominance on every transaction. At 1M scale, WAF stabilizes around baseline levels (~11.4) rather than achieving the 20–50% WAF reductions seen in read-heavy workloads (B, C, D). A complete structural fix requires decoupling pure ingestion velocity from RMW atomic-update velocity via RMW-aware Gini skew dampening (tracked in Section 11).
 
 ---
 
