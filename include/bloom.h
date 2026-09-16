@@ -24,11 +24,18 @@ public:
 
     void add(Key key);
     bool possiblyContains(Key key) const;
-    void rebuild(int new_total_bits);  // structural reallocation
+    // Resize the filter (clears all bits, resets element count).
+    // Does NOT update k_ — use rebuild(bits, k) when the optimal hash count
+    // changes alongside the size (e.g. after reallocateStructural).
+    void rebuild(int new_total_bits);
+    // Resize the filter AND update the number of hash functions.
+    // Use this when bits-per-key changes so k stays optimal.
+    void rebuild(int new_total_bits, int new_k);
     void clear();
 
     int  totalBits()   const { return (int)blocks_.size() * 8; }
-    int  numHashes()   const { return k_; }
+    int  hashCount()   const { return k_; }  // number of hash functions (k_)
+    int  elementCount() const { return n_; }
     int  numElements() const { return n_; }
     double fpr()       const; // theoretical FPR = (1 - e^(-k*n/m))^k
 
@@ -96,12 +103,30 @@ struct SStableAccessTracker {
 class SSTable;
 
 struct BloomAllocator {
+    // ---------------------------------------------------------------------------
+    // allocateWithBudget — centralized budget-preserving allocator.
+    //
+    // Computes a per-level bit allocation that:
+    //   (a) Uses normalized weights: w_i = f_i * d_i / (sum_j f_j * d_j)
+    //       where f_i = |L_i| / sum_j |L_j|  and  d_i = 1 + 0.1*i
+    //   (b) Pre-assigns b_min = 512 bits per level (one Bloom block).
+    //   (c) Distributes remaining budget proportional to w_i (water-filling).
+    //   (d) Guarantees: every b_i >= b_min, sum(b_i) <= total_budget_bits.
+    //   (e) If L * b_min > total_budget_bits, emits a warning and falls back
+    //       to b_min for every level (cannot conserve budget in this case).
+    // ---------------------------------------------------------------------------
+    static std::vector<int64_t> allocateWithBudget(
+        const std::vector<int>& counts,    // entry count per level
+        int64_t total_budget_bits,
+        int bits_per_key,
+        const std::vector<double>& freq_factors = {}); // optional per-level freq multiplier
+
     // Structural trigger: called after AHLC compaction changes level shapes
     static void reallocateStructural(
         std::vector<BlockedBloomFilter>& filters,
         const std::vector<std::vector<std::vector<KVPair>>>& levels,
         int bits_per_key,         // bits per key per level (primary driver)
-        size_t max_total_bytes);  // safety cap (e.g. 128 MB)
+        size_t max_total_bytes);  // safety cap (e.g. 256 MB)
 
     static void reallocateStructural(
         std::vector<BlockedBloomFilter>& filters,
@@ -109,12 +134,16 @@ struct BloomAllocator {
         int bits_per_key,
         size_t max_total_bytes);
 
-    // Frequency trigger: micro-boost hot SSTables (Merlin-style)
+    // Frequency trigger: micro-boost hot levels (Merlin-style).
+    // Frequency information modifies allocation WEIGHTS (not added on top):
+    //   w_i = f_i * d_i * freq_factor_i
+    // followed by the SAME normalized/water-filled allocator.
+    // This preserves the global budget regardless of frequency distribution.
     static void reallocateFrequency(
         std::vector<BlockedBloomFilter>& filters,
         const std::vector<SStableAccessTracker>& trackers,
         const std::vector<std::vector<std::vector<KVPair>>>& levels,
-        int bits_per_key);        // base bits/key — bonus is +10% of this
+        int bits_per_key);
 
     static void reallocateFrequency(
         std::vector<BlockedBloomFilter>& filters,

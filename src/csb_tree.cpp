@@ -343,11 +343,24 @@ std::vector<KVPair> ConcurrentCSBTree::scan(Key start, Key end) {
 }
 
 std::vector<KVPair> ConcurrentCSBTree::flush() {
+#ifdef CASCADE_FLUSH_TIMING
+    using Clock = std::chrono::high_resolution_clock;
+    auto t_flush_start = Clock::now();
+    uint64_t lock_time_ns = 0;
+#endif
+
     // Acquire exclusive locks across all partitions in canonical index order to prevent deadlocks
     std::vector<std::unique_lock<std::shared_mutex>> locks;
     locks.reserve(NUM_PARTITIONS);
     for (size_t i = 0; i < NUM_PARTITIONS; i++) {
+#ifdef CASCADE_FLUSH_TIMING
+        auto t_lock0 = Clock::now();
+#endif
         locks.emplace_back(partitions_[i].rw_mu);
+#ifdef CASCADE_FLUSH_TIMING
+        lock_time_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - t_lock0).count();
+#endif
     }
 
     std::vector<KVPair> result;
@@ -355,7 +368,29 @@ std::vector<KVPair> ConcurrentCSBTree::flush() {
     for (size_t i = 0; i < NUM_PARTITIONS; i++) {
         partitions_[i].flush(result);
     }
+
+#ifdef CASCADE_FLUSH_TIMING
+    auto t_merge_start = Clock::now();
+#endif
     std::sort(result.begin(), result.end());
+#ifdef CASCADE_FLUSH_TIMING
+    auto t_merge_end = Clock::now();
+    auto t_flush_end = t_merge_end;
+    // Update timing stats (mutable member — no mutex needed since flush() holds all locks)
+    last_flush_stats_.total_flush_time_ns    = (uint64_t)std::chrono::duration_cast<
+        std::chrono::nanoseconds>(t_flush_end - t_flush_start).count();
+    last_flush_stats_.merge_sort_time_ns     = (uint64_t)std::chrono::duration_cast<
+        std::chrono::nanoseconds>(t_merge_end - t_merge_start).count();
+    last_flush_stats_.partition_lock_time_ns = lock_time_ns;
+    last_flush_stats_.num_partitions         = (int)NUM_PARTITIONS;
+    last_flush_stats_.items_flushed          = result.size();
+#else
+    // No timing: reset to zero (always valid)
+    last_flush_stats_ = FlushTimingStats{};
+    last_flush_stats_.num_partitions = (int)NUM_PARTITIONS;
+    last_flush_stats_.items_flushed  = result.size();
+#endif
+
     total_count_.store(0, std::memory_order_relaxed);
 
     EpochManager::instance().runGC();

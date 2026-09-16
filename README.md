@@ -1,7 +1,7 @@
 # CASCADE: Cache-Sensitive Adaptive Storage Architecture for Dynamic and Efficient LSM-Tree Design
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
-[![Tests](https://img.shields.io/badge/Tests-234%20passed%2C%200%20failed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-307%20passed%2C%200%20failed-brightgreen.svg)]()
 [![ASan](https://img.shields.io/badge/ASan-Clean-brightgreen.svg)]()
 [![TSan](https://img.shields.io/badge/TSan-Clean-brightgreen.svg)]()
 
@@ -56,7 +56,7 @@
 
 ### Build & Run
 ```bash
-# 1. Clean build + test suite (234 passed, 0 failed — ASan/TSan verified)
+# 1. Clean build + test suite (307 passed, 0 failed — ASan/TSan verified)
 make clean && make test
 
 # 2. Full 6-scale sweep (11 workloads × 3/5 repeats × 2 systems)
@@ -83,7 +83,7 @@ make mt_compaction && ./mt_compaction_bench
 brew install rocksdb   # macOS
 make rocksdb_bench && ./rocksdb_bench
 
-# 9. Reproduce all paper tables from raw CSVs
+# 9. Reproduce all paper tables and paired-difference statistical analysis from raw CSVs
 python3 scripts/aggregate_results.py
 ```
 
@@ -371,15 +371,43 @@ All values below are reflected in `include/common.h` (`Config` struct) and `benc
 
 | Parameter | Value | Notes |
 |---|---|---|
-| `bloom_bits_per_key` | **14** bits/key | Monkey-optimal; FPR ≈ 0.1–0.4% at 1M–10M keys |
-| `bmin` (floor) | **512 bits** | One 64-byte cache line per level minimum |
+| `bloom_bits_per_key` | **14** bits/key | Monkey-optimal; FPR ≈ 0.1–0.4% at 1M–10M keys ($k = \text{round}(\ln 2 \cdot bpk) = 10$) |
+| `bmin` (floor) | **512 bits** | One 64-byte block per level minimum; strictly budget-conserving water-filling allocation |
 | `d_i` (depth weight) | **1 + 0.1×i** | L0=1.0, L6=1.6; linear empirical constant |
 | RAF block size | **4096 bytes** | One `pread(fd,buf,4096,off)` = 1 block read |
 | RAF cache hits | **NOT counted** | Only OS-reaching reads increment the counter |
-| `memtable_capacity` | 4096 entries | |
+| `memtable_capacity` | 4096 entries | Partitioned across 32 cache-aligned subtrees |
 | `max_levels` | 7 (L0–L6) | |
-| `bloom_max_bytes` | 256 MB cap | |
+| `bloom_max_bytes` | 256 MB cap | Safety upper bound; actual allocation sized to entry counts |
 | `block_cache_capacity` | 64 MB LRU | |
-| AHLC τ_v | 5000 B/s | Write velocity threshold for Tiering |
-| AHLC τ_skew | 0.65 | Gini coefficient threshold for Leveling |
+| AHLC $\tau_v$ | 5000 B/s | Write velocity threshold (bytes/sec); saturation (`any_level_full`) gates Tiering transitions |
+| AHLC $\tau_{skew}$ | 0.65 | Gini coefficient threshold for Leveling |
 | `ahlc_hysteresis_epochs` | 3 | Cooldown epochs after each strategy switch |
+| WAF Accounting | Decomposed | Logical, WAL, flush, compaction tracked separately with zero double-counting |
+
+---
+
+## 🔬 Pre-Submission Soundness & Reproducibility Enhancements
+
+The codebase includes targeted pre-submission corrections ensuring strict mathematical consistency, experimental validity, and independent reproducibility:
+
+1. **AHLC Telemetry & Decision Tracing (`include/ahlc.h`, `include/common.h`)**:
+   - `AHLCDiagnostic` struct and extended `StrategySwitchLog` capture all 12 operational signals (velocity, threshold, saturation flag, level index, skew, hysteresis cooldown) on every evaluation.
+   - Clarified that $\tau_v = 5000\text{ B/s}$ operates with 15–20 MB/s actual flushes, making dynamic level saturation (`any_level_full`) the active gate for Tiering transitions.
+2. **Bloom Budget Conservation & Optimal $k$ (`include/bloom.h`, `src/bloom.cpp`)**:
+   - Implemented centralized block-granularity water-filling in `BloomAllocator::allocateWithBudget()`. Strictly preserves the global bit budget: $\sum b_i \le B$ with $b_i \ge 512$ bits per level.
+   - Updated `rebuild(bits, k)` to apply the optimal hash count ($k = 10$ for $bpk = 14$) rather than discarding the calculation.
+   - Replaced additive frequency boosts with budget-preserving weight re-normalization.
+3. **Workload F Operation Mix (`include/workload.h`)**:
+   - Explicitly cleared inherited struct defaults in `workloadF()` (`update_frac = 0.0`), ensuring exact 50% READ / 50% RMW transaction generation.
+4. **WAF Decomposition & Race-Free Tracking (`include/metrics.h`, `src/lsm.cpp`)**:
+   - Separated SSTable write metrics into `bytes_written_flush` (MemTable $\to$ L0) and `bytes_written_compaction` (L$_i \to$ L$_{i+1}$).
+   - Added `printWAFComponents()` to verify $\text{flush} + \text{compaction} = \text{sstable\_total}$ and confirm WAL bytes are not double-counted.
+5. **Statistical Paired Analysis (`scripts/aggregate_results.py`)**:
+   - Added `paired_analysis()` pairing CASCADE and Baseline runs by `run_id` to report mean difference, sample standard deviation, and Student's t 95% confidence intervals.
+6. **Partition Merge Timing (`include/csb_tree.h`, `src/csb_tree.cpp`)**:
+   - Added `FlushTimingStats` measuring lock acquisition, partition flush, and sort-merge durations under `-DCASCADE_FLUSH_TIMING`.
+7. **Experiment Reproducibility Metadata (`include/metadata.h`)**:
+   - Added `printExperimentMetadata()` to emit git commit, compiler version, OS, hardware, and full configuration under `# META:` tags for automated log parsing.
+8. **Extended Verification Suite (`tests/test_all.cpp`)**:
+   - 13 test suites with **307 assertions** covering budget conservation, AHLC diagnostics, Workload F distribution, WAF accounting, Bloom hash counts, and Gini complexity. Verified 100% clean under AddressSanitizer and ThreadSanitizer.

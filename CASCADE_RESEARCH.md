@@ -299,7 +299,7 @@ These five workloads are defined in this paper and are **not** part of the stand
 - **Machine**: Apple Silicon (arm64, Darwin 25.6.0)
 - **Compiler**: Apple Clang, `-std=c++17 -O2 -pthread`
 - **I/O Subsystem**: Real POSIX disk I/O, plain `fsync()`, 4KB block size, 64MB block cache
-- **All correctness tests**: **234/234 ✅ PASS** (TSan-clean, ASan-clean)
+- **All correctness tests**: **307/307 ✅ PASS** (TSan-clean, ASan-clean)
 
 ### Correctness Test Summary
 
@@ -312,6 +312,12 @@ These five workloads are defined in this paper and are **not** part of the stand
 | 5. Concurrent Stress | 8 writers + 8 readers · 16K concurrent ops · TSan-clean | ✅ PASS |
 | 6. Per-Key Bloom Sizing | 1M keys · 14 bits/key · measured FPR = **0.365%** (< 1%) | ✅ PASS |
 | 7. WAL Persistence & Recovery | Simulated crash (un-flushed memtable) · WAL replay · SSTable persistence | ✅ PASS |
+| 8. Bloom Budget Conservation | 7 allocation scenarios · water-filling · strict budget preservation | ✅ PASS |
+| 9. AHLC Diagnostics | 8 scenarios · signal telemetry · full decision tracing | ✅ PASS |
+| 10. Workload F Mix | Exact 50% READ / 50% RMW verification | ✅ PASS |
+| 11. WAF Accounting | Flush + compaction separation · zero double-counting | ✅ PASS |
+| 12. Bloom Hash Count | Optimal $k = 10$ update on rebuild · hash count verification | ✅ PASS |
+| 13. Gini Complexity | Uniform/skewed Gini · $O(n \log n)$ timing verification | ✅ PASS |
 
 ---
 
@@ -613,7 +619,7 @@ cascade-research/
 │   └── results/               ← Raw CSV logs and markdown summaries
 │
 ├── tests/
-│   └── test_all.cpp           ← 7 test suites (234 assertions, ASan/TSan clean)
+│   └── test_all.cpp           ← 13 test suites (307 assertions, ASan/TSan clean)
 │
 ├── scripts/
 │   ├── aggregate_results.py   ← Reproduces all tables from raw CSVs (reviewer verification)
@@ -632,7 +638,7 @@ cascade-research/
 ```bash
 cd cascade-research
 
-# 1. Correctness tests (234 tests, 0 failed, ~5 seconds)
+# 1. Correctness tests (307 tests, 0 failed, ~5 seconds)
 make test
 
 # 2. AddressSanitizer + UndefinedBehaviorSanitizer (clean)

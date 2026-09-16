@@ -50,14 +50,29 @@ struct RocksDBConfig {
     // leveling compaction (matches CASCADE baseline's fixed-leveling mode)
     rocksdb::CompactionStyle compaction    = rocksdb::kCompactionStyleLevel;
     int    level0_file_num_compaction_trigger = 4;
-    int    max_background_compactions      = 1; // matches CASCADE single bg thread
-    int    max_background_flushes          = 1;
+    int    level0_slowdown_writes_trigger  = 20;  // RocksDB default; not tuned
+    int    level0_stop_writes_trigger      = 36;  // RocksDB default; not tuned
+    int    max_background_compactions      = 1;   // matches CASCADE single bg thread
+    int    max_background_flushes         = 1;
+    // max_background_jobs overrides compaction+flush threads in newer RocksDB versions.
+    // Set to -1 to use legacy separate fields; see rocksdb_adapter.h comments.
+    int    max_background_jobs             = -1;  // -1 = use legacy fields above
+    // target file size and level multiplier (RocksDB defaults)
+    uint64_t target_file_size_base        = 64ULL * 1024 * 1024; // 64MB (default)
+    int      max_bytes_for_level_multiplier = 10;                 // 10x (default)
     // bloom filter: 10 bits/key — same as CASCADE's bloom_bits_per_key config
     int    bloom_bits                      = 10;
     // block cache: 64MB — matches CASCADE's block_cache_capacity
     size_t block_cache_size                = 64ULL * 1024 * 1024;
+    // 4KB blocks — matches CASCADE SSTable BLOCK_SIZE
+    size_t block_size                      = 4096;
     // compression: none — isolates I/O from compute cost
     rocksdb::CompressionType compression   = rocksdb::kNoCompression;
+    // WAL and sync settings
+    bool   disable_wal                     = false;  // WAL enabled for fair comparison
+    bool   use_fsync                       = false;  // fdatasync (default)
+    bool   use_direct_io_for_flush_and_compaction = false; // direct I/O off by default
+    bool   use_direct_reads                = false;  // direct I/O reads off by default
 };
 
 class RocksDBAdapter {
@@ -78,9 +93,18 @@ public:
         opts.max_write_buffer_number     = rdb_cfg.max_write_buffer_number;
         opts.compaction_style            = rdb_cfg.compaction;
         opts.level0_file_num_compaction_trigger = rdb_cfg.level0_file_num_compaction_trigger;
+        opts.level0_slowdown_writes_trigger = rdb_cfg.level0_slowdown_writes_trigger;
+        opts.level0_stop_writes_trigger  = rdb_cfg.level0_stop_writes_trigger;
         opts.max_background_compactions  = rdb_cfg.max_background_compactions;
         opts.max_background_flushes      = rdb_cfg.max_background_flushes;
+        if (rdb_cfg.max_background_jobs > 0)
+            opts.max_background_jobs     = rdb_cfg.max_background_jobs;
+        opts.target_file_size_base       = rdb_cfg.target_file_size_base;
+        opts.max_bytes_for_level_multiplier = (double)rdb_cfg.max_bytes_for_level_multiplier;
         opts.compression                 = rdb_cfg.compression;
+        opts.use_fsync                   = rdb_cfg.use_fsync;
+        opts.use_direct_io_for_flush_and_compaction = rdb_cfg.use_direct_io_for_flush_and_compaction;
+        opts.use_direct_reads            = rdb_cfg.use_direct_reads;
         opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_opts));
 
         auto status = rocksdb::DB::Open(opts, db_path, &db_);
@@ -156,6 +180,39 @@ public:
         std::string stats;
         db_->GetProperty("rocksdb.stats", &stats);
         return stats;
+    }
+
+    // Print all configuration settings in key=value format for reproducibility.
+    // Call this at benchmark startup so the exact config is always in the log.
+    void printConfig(const RocksDBConfig& rdb_cfg = RocksDBConfig()) const {
+        std::cout << "\n  [RocksDB Config Dump]\n";
+        std::cout << "    write_buffer_size              = " << rdb_cfg.write_buffer_size << "\n";
+        std::cout << "    max_write_buffer_number        = " << rdb_cfg.max_write_buffer_number << "\n";
+        std::cout << "    compaction_style               = "
+                  << (rdb_cfg.compaction == rocksdb::kCompactionStyleLevel ? "Level" :
+                      rdb_cfg.compaction == rocksdb::kCompactionStyleUniversal ? "Universal" : "Other")
+                  << "\n";
+        std::cout << "    level0_file_num_compaction_trigger = " << rdb_cfg.level0_file_num_compaction_trigger << "\n";
+        std::cout << "    level0_slowdown_writes_trigger = " << rdb_cfg.level0_slowdown_writes_trigger << "\n";
+        std::cout << "    level0_stop_writes_trigger     = " << rdb_cfg.level0_stop_writes_trigger << "\n";
+        std::cout << "    max_background_compactions     = " << rdb_cfg.max_background_compactions << "\n";
+        std::cout << "    max_background_flushes         = " << rdb_cfg.max_background_flushes << "\n";
+        std::cout << "    max_background_jobs            = " << rdb_cfg.max_background_jobs
+                  << " (-1 = use legacy fields)\n";
+        std::cout << "    target_file_size_base          = " << rdb_cfg.target_file_size_base << "\n";
+        std::cout << "    max_bytes_for_level_multiplier = " << rdb_cfg.max_bytes_for_level_multiplier << "\n";
+        std::cout << "    bloom_bits_per_key             = " << rdb_cfg.bloom_bits << "\n";
+        std::cout << "    block_cache_size               = " << rdb_cfg.block_cache_size << "\n";
+        std::cout << "    block_size                     = " << rdb_cfg.block_size << "\n";
+        std::cout << "    compression                    = "
+                  << (rdb_cfg.compression == rocksdb::kNoCompression ? "none" : "compressed")
+                  << "\n";
+        std::cout << "    disable_wal                    = " << (rdb_cfg.disable_wal ? "true" : "false") << "\n";
+        std::cout << "    use_fsync                      = " << (rdb_cfg.use_fsync ? "true" : "false") << "\n";
+        std::cout << "    use_direct_io_flush_compact    = "
+                  << (rdb_cfg.use_direct_io_for_flush_and_compaction ? "true" : "false") << "\n";
+        std::cout << "    use_direct_reads               = " << (rdb_cfg.use_direct_reads ? "true" : "false") << "\n";
+        std::cout << "  [End RocksDB Config Dump]\n";
     }
 
     static void destroyDB(const std::string& path) {

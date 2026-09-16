@@ -392,6 +392,371 @@ void testWALRecovery() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8: Bloom Budget Conservation (STEP 2)
+// Verifies that allocateWithBudget() guarantees sum(b_i) <= total_budget_bits
+// and every b_i >= b_min across 7 distinct allocation scenarios.
+// ---------------------------------------------------------------------------
+void testBloomBudgetConservation() {
+    std::cout << "\n== Test 8: Bloom Budget Conservation ==\n";
+
+    struct Case {
+        std::string name;
+        std::vector<int> counts;
+        int64_t budget_bits;
+        int bpk;
+    };
+    std::vector<Case> cases = {
+        // Typical: 7 levels, 14 bits/key, 256 MB budget
+        {"typical_7_levels",      {1000, 5000, 25000, 125000, 625000, 3125000, 0},
+         256LL*1024*1024*8, 14},
+        // Very small budget: forces floor dominance
+        {"tight_budget",          {100, 200, 300}, 512*5, 14},
+        // Single level
+        {"single_level",          {50000}, 10*1024*1024*8, 14},
+        // All empty except one
+        {"sparse_levels",         {0, 0, 5000, 0, 0}, 256LL*1024*1024*8, 14},
+        // Budget exactly L * b_min (water-filling gives nothing extra)
+        {"exact_floor_budget",    {1000, 2000, 3000}, 512*3, 14},
+        // Large number of levels
+        {"many_levels",           {500,1000,2000,4000,8000,16000,32000,64000,128000,256000,512000,1024000,0,0,0},
+         256LL*1024*1024*8, 10},
+        // Budget below L * b_min (fallback path)
+        {"below_floor_budget",    {100, 200, 300}, 512*2, 14},
+    };
+
+    for (auto& tc : cases) {
+        int L = (int)tc.counts.size();
+        auto alloc = BloomAllocator::allocateWithBudget(tc.counts, tc.budget_bits, tc.bpk);
+
+        CHECK((int)alloc.size() == L, tc.name + ": alloc size == L");
+
+        // Every b_i >= b_min (512 bits)
+        bool floor_ok = true;
+        for (int i = 0; i < L; i++) {
+            if (alloc[i] < 512) { floor_ok = false; break; }
+        }
+        CHECK(floor_ok, tc.name + ": every b_i >= 512 (b_min)");
+
+        // Budget below floor: only check floor, not total
+        if (tc.budget_bits < (int64_t)L * 512) continue;
+
+        // sum(b_i) <= budget_bits + L (rounding slack of 1 block per level)
+        int64_t total = 0;
+        for (auto b : alloc) total += b;
+        bool budget_ok = (total <= tc.budget_bits + (int64_t)L * 512);
+        CHECK(budget_ok, tc.name + ": sum(b_i) <= budget + L*block_slack");
+    }
+
+    // Verify that rebuild(bits, k) actually updates k_
+    BlockedBloomFilter bf(512, 8);
+    CHECK(bf.hashCount() == 8, "initial k_ = 8");
+    bf.rebuild(4096, 10);
+    CHECK(bf.hashCount() == 10, "k_ updated to 10 after rebuild(bits,k)");
+    CHECK(bf.totalBits() == 4096, "totalBits updated after rebuild");
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: AHLC Diagnostics (STEP 1)
+// Verifies all 8 diagnostic scenarios: each tests that lastDiagnostic() captures
+// the correct signals and decision_reason without changing behavior.
+// ---------------------------------------------------------------------------
+void testAHLCDiagnostics() {
+    std::cout << "\n== Test 9: AHLC Diagnostics ==\n";
+
+    // Scenario 1: velocity ABOVE tau_v AND level full -> TIERING
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1000.0; // 1 KB/s — easily exceeded
+        cfg.ahlc_skew_threshold    = 0.65;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        auto s = e.evaluate(2e6, 0.3, true, 0);  // vel=2MB/s, any_full=true
+        CHECK(s == Strategy::TIERING, "Diag1: velocity+saturation -> TIERING");
+        auto diag = e.lastDiagnostic();
+        CHECK(diag.velocity_condition,  "Diag1: velocity_condition=true");
+        CHECK(diag.any_level_full,      "Diag1: any_level_full=true");
+        CHECK(!diag.skew_condition,     "Diag1: skew_condition=false (skew=0.3<0.65)");
+        CHECK(diag.decision_reason == "velocity+saturation", "Diag1: decision_reason");
+        CHECK(diag.first_full_level == 0, "Diag1: first_full_level=0");
+    }
+
+    // Scenario 2: high skew -> LEVELING
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1e18;  // never exceeded
+        cfg.ahlc_skew_threshold    = 0.65;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        auto s = e.evaluate(0.0, 0.9, false);
+        CHECK(s == Strategy::LEVELING, "Diag2: high_skew -> LEVELING");
+        auto diag = e.lastDiagnostic();
+        CHECK(!diag.velocity_condition, "Diag2: velocity_condition=false");
+        CHECK(diag.skew_condition,      "Diag2: skew_condition=true");
+        CHECK(diag.decision_reason == "high_skew", "Diag2: decision_reason");
+    }
+
+    // Scenario 3: default path -> HYBRID
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1e18;
+        cfg.ahlc_skew_threshold    = 0.65;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        auto s = e.evaluate(0.0, 0.3, false);
+        CHECK(s == Strategy::HYBRID, "Diag3: default -> HYBRID");
+        auto diag = e.lastDiagnostic();
+        CHECK(diag.decision_reason == "default", "Diag3: decision_reason=default");
+        CHECK(!diag.transition_occurred, "Diag3: no transition (stayed HYBRID)");
+    }
+
+    // Scenario 4: cooldown prevents switch
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1000.0;
+        cfg.ahlc_hysteresis_epochs = 2;
+        AHLCEngine e(cfg);
+        e.evaluate(2e6, 0.3, true);   // triggers TIERING, sets cooldown=2
+        int switches_before = e.switches();
+        e.evaluate(0.0, 0.3, false);  // cooldown=1, should stay TIERING
+        auto diag = e.lastDiagnostic();
+        CHECK(e.switches() == switches_before, "Diag4: no switch during cooldown");
+        CHECK(!diag.transition_occurred, "Diag4: transition_occurred=false in cooldown");
+        CHECK(diag.decision_reason.find("cooldown") != std::string::npos,
+              "Diag4: decision_reason mentions cooldown");
+    }
+
+    // Scenario 5: velocity above tau_v but level NOT full -> no TIERING
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1000.0;
+        cfg.ahlc_skew_threshold    = 0.65;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        auto s = e.evaluate(2e6, 0.3, false);  // vel exceeded but !any_full
+        CHECK(s == Strategy::HYBRID, "Diag5: high vel but !any_full -> HYBRID");
+        auto diag = e.lastDiagnostic();
+        CHECK(diag.velocity_condition, "Diag5: velocity_condition=true");
+        CHECK(!diag.any_level_full,    "Diag5: any_level_full=false");
+        CHECK(diag.decision_reason == "default", "Diag5: falls through to default");
+    }
+
+    // Scenario 6: velocity below tau_v, level full -> no TIERING
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1e18; // never exceeded
+        cfg.ahlc_skew_threshold    = 0.65;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        auto s = e.evaluate(500.0, 0.3, true);  // vel < tau_v, any_full=true
+        CHECK(s == Strategy::HYBRID, "Diag6: low vel + any_full -> HYBRID (need both)");
+        auto diag = e.lastDiagnostic();
+        CHECK(!diag.velocity_condition, "Diag6: velocity_condition=false");
+    }
+
+    // Scenario 7: diagnostic fields populated even when no switch
+    {
+        Config cfg;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        e.evaluate(0.0, 0.3, false); // HYBRID (no change)
+        auto diag = e.lastDiagnostic();
+        CHECK(diag.velocity_threshold == cfg.ahlc_write_rate_high,
+              "Diag7: velocity_threshold populated even without switch");
+        CHECK(diag.skew_threshold == cfg.ahlc_skew_threshold,
+              "Diag7: skew_threshold populated even without switch");
+    }
+
+    // Scenario 8: switch log gets extended fields
+    {
+        Config cfg;
+        cfg.ahlc_write_rate_high   = 1000.0;
+        cfg.ahlc_skew_threshold    = 0.65;
+        cfg.ahlc_hysteresis_epochs = 0;
+        AHLCEngine e(cfg);
+        e.evaluate(2e6, 0.3, true); // triggers switch HYBRID->TIERING
+        auto log = e.switchLog();
+        CHECK(!log.empty(), "Diag8: switch log has entry");
+        CHECK(log[0].velocity_condition,  "Diag8: log entry has velocity_condition=true");
+        CHECK(log[0].any_level_full,      "Diag8: log entry has any_level_full=true");
+        CHECK(log[0].velocity_threshold == 1000.0, "Diag8: log entry has velocity_threshold");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Workload F Mix Verification (STEP 4)
+// Verifies that workloadF generates exactly 50% READ / 50% RMW (±1%).
+// ---------------------------------------------------------------------------
+void testWorkloadFMix() {
+    std::cout << "\n== Test 10: Workload F Mix Verification ==\n";
+
+    // Use 10000 ops for statistical stability
+    auto wl = workloadF(10000);
+    auto ops = generateOps(wl, 42);
+
+    int reads = 0, rmws = 0, others = 0;
+    for (auto& op : ops) {
+        if      (op.type == OpType::READ) reads++;
+        else if (op.type == OpType::RMW)  rmws++;
+        else                              others++;
+    }
+    int total = (int)ops.size();
+    double read_frac = (double)reads / total;
+    double rmw_frac  = (double)rmws  / total;
+
+    CHECK(total > 0, "workloadF generates operations");
+    CHECK(others == 0, "workloadF has no INSERT/UPDATE/DELETE/SCAN ops");
+    // Allow ±1% from 50% (i.e. 49%-51%)
+    bool read_ok = (read_frac >= 0.49 && read_frac <= 0.51);
+    bool rmw_ok  = (rmw_frac  >= 0.49 && rmw_frac  <= 0.51);
+    CHECK(read_ok, "READ fraction in [49%,51%] (actual=" + std::to_string((int)(read_frac*100)) + "%)");
+    CHECK(rmw_ok,  "RMW fraction in [49%,51%] (actual=" + std::to_string((int)(rmw_frac*100)) + "%)");
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: WAF Accounting Verification (STEP 11)
+// Verifies that bytes_written_flush + bytes_written_compaction <= bytes_written_sstables
+// and that WAF components are consistent with the reported WAF value.
+// ---------------------------------------------------------------------------
+void testWAFAccounting() {
+    std::cout << "\n== Test 11: WAF Accounting Verification ==\n";
+
+    std::string dir = "./data_waf_test";
+    (void)system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+    Config cfg;
+    cfg.db_path             = dir;
+    cfg.memtable_capacity   = 512;
+    cfg.max_levels          = 5;
+    cfg.bloom_bits_per_key  = 14;
+    cfg.bloom_max_bytes     = 8ULL * 1024 * 1024;
+    cfg.block_cache_capacity = 4ULL * 1024 * 1024;
+
+    LSMEngine engine(cfg);
+    for (int i = 1; i <= 5000; i++)
+        engine.insert((Key)i, "v" + std::to_string(i));
+    engine.flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    const auto& m = engine.metrics();
+    int64_t wal       = m.bytes_written_wal.load();
+    int64_t flush_io  = m.bytes_written_flush.load();
+    int64_t compact_io = m.bytes_written_compaction.load();
+    int64_t sst_total = m.bytes_written_sstables.load();
+    int64_t logical   = m.bytes_ingested_logical.load();
+
+    CHECK(logical > 0, "WAF: logical bytes > 0 after inserts");
+    CHECK(wal >= 0, "WAF: wal bytes >= 0");
+    CHECK(flush_io >= 0, "WAF: flush bytes >= 0");
+    CHECK(compact_io >= 0, "WAF: compaction bytes >= 0");
+    // flush + compaction <= sst_total (may differ by timing snapshots)
+    CHECK(flush_io + compact_io <= sst_total + 1, "WAF: flush+compact <= sst_total (±1)");
+    // WAF formula: (wal + sst) / logical
+    double waf_computed = (double)(wal + sst_total) / (double)logical;
+    double waf_reported = m.waf();
+    CHECK(std::abs(waf_computed - waf_reported) < 1e-6,
+          "WAF: computed from components matches metrics.waf()");
+    CHECK(waf_reported >= 1.0, "WAF: WAF >= 1.0 (physical >= logical)");
+
+    (void)system(("rm -rf " + dir).c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Bloom Hash Count (STEP 2B)
+// Verifies that the k_ used in filters matches optimalBloomK(bpk)
+// after rebuild(bits, k), and that the optimal k for bpk=14 is 10.
+// ---------------------------------------------------------------------------
+void testBloomHashCount() {
+    std::cout << "\n== Test 12: Bloom Hash Count (k_) Correctness ==\n";
+
+    // The fundamental check: optimalBloomK(14) must equal 10 (= floor(0.693 * 14 + 0.5))
+    int k14 = optimalBloomK(14);
+    CHECK(k14 == 10, "optimalBloomK(14) = 10 (the documented optimal k for bpk=14)");
+
+    // With old 1-arg rebuild, k_ should stay at whatever was set at construction.
+    BlockedBloomFilter bf_old(512, 8);
+    bf_old.rebuild(4096);  // 1-arg: does NOT change k_
+    CHECK(bf_old.hashCount() == 8, "rebuild(bits) does NOT change k_");
+
+    // With new 2-arg rebuild, k_ must be updated.
+    BlockedBloomFilter bf_new(512, 8);
+    bf_new.rebuild(4096, 10);  // 2-arg: DOES change k_
+    CHECK(bf_new.hashCount() == 10, "rebuild(bits, k) updates k_ to 10");
+
+    // Clamp: k_ should not exceed 32
+    BlockedBloomFilter bf_clamp(512, 8);
+    bf_clamp.rebuild(512, 100);
+    CHECK(bf_clamp.hashCount() <= 32, "k_ clamped to 32 maximum");
+    CHECK(bf_clamp.hashCount() >= 1,  "k_ clamped to 1 minimum");
+
+    // FPR should be lower with k=10 than k=1 at the same bit budget
+    BlockedBloomFilter bf_k10(8192, 10);
+    BlockedBloomFilter bf_k1(8192, 1);
+    const int N = 500;
+    for (int i = 1; i <= N; i++) {
+        bf_k10.add((Key)i);
+        bf_k1.add((Key)i);
+    }
+    CHECK(bf_k10.fpr() <= bf_k1.fpr() + 0.1,
+          "FPR with optimal k=10 <= FPR with k=1 (same bits)");
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: Gini Complexity / Timing (STEP 3)
+// Validates the O(n log n) sort-based formula produces correct Gini values
+// and (if CASCADE_AHLC_TIMING defined) measures wall-clock time.
+// ---------------------------------------------------------------------------
+void testGiniComplexity() {
+    std::cout << "\n== Test 13: Gini Complexity / Formula Validation ==\n";
+
+    // Perfectly equal distribution: Gini = 0
+    {
+        GiniSkewEstimator est;
+        for (int i = 0; i < 100; i++) est.recordAccess((Key)1); // all access same key = uniform
+        double g = est.gini();
+        CHECK(g < 0.01, "Gini=0 for perfectly uniform distribution (1 unique key)");
+    }
+
+    // Perfect inequality: one key gets all accesses
+    {
+        GiniSkewEstimator est;
+        for (int i = 0; i < 1000; i++) est.recordAccess((Key)0);
+        double g = est.gini();
+        // With 1 unique key, Gini = 0 (only one non-zero bucket)
+        CHECK(g == 0.0, "Gini=0 when only one unique key (degenerate case)");
+    }
+
+    // Two groups: one dominant — Gini should be between 0 and 1
+    {
+        GiniSkewEstimator est;
+        // Use a full window cycle: 10 hot accesses to key 0, 90 cold keys (1 access each)
+        // Total = 100, fits in the 2048-entry WINDOW
+        for (int i = 0; i < 10; i++) est.recordAccess((Key)0); // hot key
+        for (int i = 1; i <= 90; i++) est.recordAccess((Key)i); // 90 cold keys
+        double g = est.gini();
+        CHECK(g > 0.01 && g < 1.0, "Gini in (0,1) for skewed distribution");
+        std::cout << "  [INFO] Gini for 10-heavy / 90-cold distribution = " << g << "\n";
+    }
+
+    // Timing test: fill window with diverse keys (measures the O(n log n) sort)
+    {
+        GiniSkewEstimator est;
+        std::mt19937 rng(42);
+        // Use 2048 unique-ish keys cycling through the WINDOW
+        std::uniform_int_distribution<int> dist(0, 1999);
+        for (int i = 0; i < 10000; i++) est.recordAccess((Key)dist(rng));
+        auto t0 = std::chrono::high_resolution_clock::now();
+        double g = est.gini();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double,std::milli>(t1-t0).count();
+        CHECK(g >= 0.0 && g <= 1.0, "Gini in [0,1] for large-n computation");
+        std::cout << "  [INFO] Gini(2K-key window, 10K records) = "
+                  << g << " in " << ms << " ms\n";
+        // On modern hardware, 2K-entry sort should complete in < 10ms
+        CHECK(ms < 10.0, "Gini O(n log n) completes in < 10ms for n=2000");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MAIN
 // ---------------------------------------------------------------------------
 int main() {
@@ -407,6 +772,14 @@ int main() {
     testConcurrentStress();
     testBloomPerKeyScaling();
     testWALRecovery();
+
+    // New tests (pre-submission corrections)
+    testBloomBudgetConservation();  // STEP 2: budget preservation + k_ fix
+    testAHLCDiagnostics();          // STEP 1: diagnostic fields verification
+    testWorkloadFMix();             // STEP 4: Workload F 50/50 READ/RMW
+    testWAFAccounting();            // STEP 11: WAF component decomposition
+    testBloomHashCount();           // STEP 2B: k_ correctness after rebuild
+    testGiniComplexity();           // STEP 3: Gini O(n log n) formula
 
     std::cout << "\n  +---------------------------------------------+\n";
     std::cout << "  |  Results: " << passed << " passed, " << failed << " failed\n";

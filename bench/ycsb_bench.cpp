@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
     std::cout << "  +----------+--------------+--------------+--------+\n";
     std::cout << "  | Threads  | SkipList(K/s)| CSB+  (K/s) | Gain % |\n";
     std::cout << "  +----------+--------------+--------------+--------+\n";
-    for (int t : {1, 2, 4, 8, 16}) {
+    for (int t : {1, 2, 4, 8, 16, 32}) {
         auto wl = workloadA(N2);
         Config sl_cfg  = base_cfg;
         Config csb_cfg = base_cfg;

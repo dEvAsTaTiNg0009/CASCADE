@@ -28,6 +28,27 @@
 #include <shared_mutex>
 #include <memory>
 #include <algorithm>
+#include <chrono>  // always needed for flush timing
+
+// ---------------------------------------------------------------------------
+// FlushTimingStats — optional timing measurement for the 32-way partition
+// flush and merge operation.  Enabled by compiling with -DCASCADE_FLUSH_TIMING.
+// When not defined, the struct is still available but all fields are zero and
+// lastFlushStats() returns a zeroed record (no overhead).
+// ---------------------------------------------------------------------------
+struct FlushTimingStats {
+    uint64_t total_flush_time_ns  = 0; // wall time from first lock to last KV returned
+    uint64_t merge_sort_time_ns   = 0; // time spent in the final sort-merge across partitions
+    uint64_t partition_lock_time_ns = 0; // cumulative time spent acquiring partition locks
+    int      num_partitions       = 0; // always NUM_PARTITIONS (32)
+    size_t   items_flushed        = 0; // total KVPairs returned
+    // Derived: merge_sort_time_ns / total_flush_time_ns gives merge cost fraction
+    double mergeFraction() const {
+        return (total_flush_time_ns > 0)
+            ? (double)merge_sort_time_ns / total_flush_time_ns : 0.0;
+    }
+};
+
 
 namespace cascade {
 
@@ -128,9 +149,15 @@ public:
         total_lock_acquisitions_.store(0);
     }
 
+    // Flush timing stats — populated after each flush() call when
+    // -DCASCADE_FLUSH_TIMING is defined.  Always returns a valid struct
+    // (zero fields when timing is disabled).
+    FlushTimingStats lastFlushStats() const { return last_flush_stats_; }
+
 private:
     std::unique_ptr<CSBPartition[]> partitions_;
     std::atomic<int>                total_count_{0};
+    mutable FlushTimingStats        last_flush_stats_; // updated by flush()
 
     static inline size_t getPartition(Key key) {
         key ^= (key >> 30);

@@ -26,6 +26,7 @@
 #include "sstable.h"
 #include "skiplist_mt.h"
 #include "csb_tree.h"
+#include "metadata.h"   // printExperimentMetadata (STEP 12)
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -580,7 +581,7 @@ void profileAnomaly2() {
     ss << "# Anomaly 2: Workload F Strategy Switches\n";
     ss << "# Total Switches: " << switch_history.size() << "\n";
     ss << "# Final WAF: " << engine.metrics().waf() << "\n";
-    ss << "Timestamp(ms)\tFromStrategy\tToStrategy\tWriteVelocity(B/s)\tSkewGini\n";
+    ss << "Timestamp(ms)\tFromStrategy\tToStrategy\tWriteVelocity(B/s)\tVelThresh\tVelCond\tAnyFull\tSkewGini\tSkewThresh\tSkewCond\n";
 
     auto stratToStr = [](Strategy s) -> const char* {
         switch(s) {
@@ -595,7 +596,13 @@ void profileAnomaly2() {
         ss << std::fixed << std::setprecision(2) << entry.timestamp_ms << "\t"
            << stratToStr(entry.from_strategy) << "\t"
            << stratToStr(entry.to_strategy) << "\t"
-           << entry.write_velocity << "\t" << entry.skew << "\n";
+           << entry.write_velocity << "\t"
+           << entry.velocity_threshold << "\t"
+           << (entry.velocity_condition ? "T" : "F") << "\t"
+           << (entry.any_level_full ? "T" : "F") << "\t"
+           << entry.skew << "\t"
+           << entry.skew_threshold << "\t"
+           << (entry.skew_condition ? "T" : "F") << "\n";
     }
     out << ss.str(); out.close();
     (void)system(("rm -rf " + cfg.db_path).c_str());
@@ -646,6 +653,24 @@ int main(int argc, char** argv) {
     std::cout << "    One block = one 4KB pread() call reaching the OS (cache hits not counted).\n";
     std::cout << "  - direct-io=" << (direct_io ? "true (F_NOCACHE/O_DIRECT)" : "false (page cache used)") << "\n";
     std::cout << "\n";
+
+    // Emit reproducibility metadata (STEP 12)
+    // Use a representative engine config (mode-independent) + a sentinel workload string.
+    // Per-run metadata (run_id, workload, seed) is captured inside executeSingleRun().
+    {
+        Config meta_cfg;
+        meta_cfg.memtable_capacity    = 4096;
+        meta_cfg.max_levels           = 7;
+        meta_cfg.bloom_bits_per_key   = 14;
+        meta_cfg.bloom_max_bytes      = 256ULL * 1024 * 1024;
+        meta_cfg.block_cache_capacity = 64ULL * 1024 * 1024;
+        meta_cfg.memtable_type        = MemtableType::CSB_PLUS;
+        meta_cfg.direct_io            = direct_io;
+        cascade::printExperimentMetadata(
+            meta_cfg, "<benchmark startup — per-run metadata emitted by executeSingleRun>",
+            0, 0, BASE_SEED,
+            "mode=" + mode + ",direct_io=" + (direct_io ? "true" : "false"));
+    }
 
     if (mode == "--anomaly1") {
         profileAnomaly1();

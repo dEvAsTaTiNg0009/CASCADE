@@ -93,9 +93,15 @@ struct EngineMetrics {
     std::atomic<int64_t>  sstable_block_reads{0};
 
     // I/O byte accounting (for WAF / RAF / SAF)
-    std::atomic<int64_t>  bytes_ingested_logical{0};  // user write bytes
-    std::atomic<int64_t>  bytes_written_wal{0};
-    std::atomic<int64_t>  bytes_written_sstables{0};  // flush + compact writes
+    std::atomic<int64_t>  bytes_ingested_logical{0};  // user write bytes (logical)
+    std::atomic<int64_t>  bytes_written_wal{0};        // WAL bytes
+    // SSTable write bytes split for traceability:
+    //   bytes_written_flush:      MemTable → L0 flush I/O
+    //   bytes_written_compaction: L_i → L_{i+1} compaction I/O
+    //   bytes_written_sstables:   combined (kept for backward compat)
+    std::atomic<int64_t>  bytes_written_flush{0};
+    std::atomic<int64_t>  bytes_written_compaction{0};
+    std::atomic<int64_t>  bytes_written_sstables{0};  // = flush + compaction
     std::atomic<int64_t>  bytes_read_sstables{0};     // SSTable reads
     std::atomic<int64_t>  logical_live_keys{0};
     std::atomic<int64_t>  physical_keys_on_disk{0};
@@ -106,6 +112,10 @@ struct EngineMetrics {
     LatencyHistogram scan_latency;
 
     // Derived RUM metrics
+    // WAF = (wal_bytes + sstable_bytes) / logical_bytes.
+    // WAL bytes and SSTable bytes are tracked separately (not double-counted).
+    // wal bytes = bytes_written_wal  (WAL append I/O)
+    // sstable bytes = bytes_written_sstables  (flush + compaction I/O combined)
     double waf() const {
         int64_t in = bytes_ingested_logical.load();
         if (in == 0) return 1.0;
@@ -125,6 +135,30 @@ struct EngineMetrics {
         int64_t p = bloom_probes.load();
         if (p == 0) return 0.0;
         return (double)bloom_false_positives.load() / p;
+    }
+
+    // Print individual WAF accounting components for auditability.
+    // This does NOT change the WAF formula — it only exposes the inputs.
+    // Useful for verifying:
+    //   (1) WAL bytes are NOT double-counted in the SSTable total.
+    //   (2) The split between flush I/O and compaction I/O.
+    void printWAFComponents(const std::string& label = "") const {
+        int64_t logical   = bytes_ingested_logical.load();
+        int64_t wal       = bytes_written_wal.load();
+        int64_t flush_io  = bytes_written_flush.load();
+        int64_t compact_io = bytes_written_compaction.load();
+        int64_t sst_total = bytes_written_sstables.load();
+        double  waf_val   = (logical > 0)
+            ? (double)(wal + sst_total) / logical : 1.0;
+        std::cout << "\n  WAF Accounting" << (label.empty() ? "" : " [" + label + "]")
+                  << ":\n"
+                  << "    logical_bytes    = " << logical    << "\n"
+                  << "    wal_bytes        = " << wal        << "\n"
+                  << "    flush_bytes      = " << flush_io   << "\n"
+                  << "    compaction_bytes = " << compact_io << "\n"
+                  << "    sstable_total    = " << sst_total  << " (flush+compaction)\n"
+                  << "    WAF              = " << std::fixed << std::setprecision(3)
+                  << waf_val << "x\n";
     }
 
     void print(const std::string& label, double elapsed_sec) const {

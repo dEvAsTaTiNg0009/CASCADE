@@ -280,6 +280,91 @@ def generate_ahlc_sweep_table(csv_path: str) -> str:
     return "\n".join(lines)
 
 
+def paired_analysis(rows: List[Dict]) -> str:
+    """Paired-difference analysis: pairs CASCADE vs Baseline runs by run_id.
+
+    For each (workload, scale, metric) group:
+      - D_r = metric_CASCADE_r - metric_Baseline_r
+      - Reports mean(D), std(D), and 95% CI (two-tailed t via normal approx).
+
+    This is a stricter test than Welch's t-test when the same run_id seed
+    produces identical I/O patterns across systems (common here since
+    seed = 42 + run_id for all workloads in all configs).
+
+    NOTE: With n=3 repeats, CIs are wide and should be interpreted qualitatively.
+    With n=5 repeats, the CIs are still approximate (normal approx to t-dist
+    with df=4) but more informative.
+    """
+    if not rows:
+        return "*No data for paired analysis*"
+
+    import math
+
+    # t critical values for 95% CI (two-tailed) by degrees of freedom.
+    # Using tabulated t_{alpha/2, df} for small n.
+    t_crit = {
+        1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776,
+        5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306,
+        9: 2.262, 10: 2.228
+    }
+    def t_critical(df: int) -> float:
+        if df <= 0: return float('inf')
+        if df in t_crit: return t_crit[df]
+        # Normal approx for large df
+        return 1.96
+
+    lines = [
+        "\n## Paired-Difference Analysis (CASCADE − Baseline, paired by run_id)\n",
+        "> Pairs each CASCADE run_r with the corresponding Baseline run_r (same seed).",
+        "> 95% CI uses two-tailed t-distribution critical values for small n.",
+        "> **With n=3 repeats, CIs are wide — interpret qualitatively, not definitively.**",
+        "",
+    ]
+
+    scales_present = sorted(set(r['scale'] for r in rows))
+    wl_names_seen  = list(dict.fromkeys(r['workload'] for r in rows))
+    ordered_wls    = [w for w in WORKLOAD_ORDER if w in wl_names_seen]
+    ordered_wls   += [w for w in wl_names_seen if w not in ordered_wls]
+
+    for sc in scales_present:
+        sc_str = format_scale(sc)
+        sc_rows = [r for r in rows if r['scale'] == sc]
+        run_ids = sorted(set(r['run_id'] for r in sc_rows))
+        n = len(run_ids)
+
+        lines.append(f"### Scale {sc_str} — n={n} paired runs")
+        lines.append("")
+        lines.append("| Workload | Metric | Mean(D) | Std(D) | 95% CI | n |")
+        lines.append("|:---|:---|:---:|:---:|:---:|:---:|")
+
+        for wl in ordered_wls:
+            for metric, field, unit in [
+                ("Throughput", lambda r: r['throughput_ops_s'] / 1000.0, "Kops/s"),
+                ("WAF",        lambda r: r['waf'],                       ""),
+                ("P99",        lambda r: r['p99_us'],                    "µs"),
+            ]:
+                diffs = []
+                for rid in run_ids:
+                    base_r = [r for r in sc_rows if r['workload'] == wl and r['config'] == 'Baseline' and r['run_id'] == rid]
+                    casc_r = [r for r in sc_rows if r['workload'] == wl and r['config'] == 'CASCADE'  and r['run_id'] == rid]
+                    if base_r and casc_r:
+                        diffs.append(field(casc_r[0]) - field(base_r[0]))
+                if not diffs:
+                    continue
+                nd = len(diffs)
+                md = mean(diffs)
+                sd = stddev(diffs) if nd > 1 else 0.0
+                tc = t_critical(nd - 1)
+                margin = tc * sd / math.sqrt(nd) if nd > 1 else float('inf')
+                ci_str = f"[{md - margin:.2f}, {md + margin:.2f}]" if nd > 1 else "(need ≥2)"
+                label = f"{metric} ({unit})" if unit else metric
+                lines.append(f"| {wl} | {label} | {md:+.3f} | {sd:.3f} | {ci_str} | {nd} |")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -384,6 +469,11 @@ def main():
                     f"| {wl} | {sc_str} | {bm:.1f} | {cm:.1f} | {rdb_str} | "
                     f"{'+' if diff>=0 else ''}{diff:.1f}% | {diff_rdb_str} | p={p:.4f} | {sig} |"
                 )
+
+    # --- Paired-difference analysis (STEP 5) ---
+    # Pairs CASCADE vs Baseline by run_id, computes mean(D) and 95% CI per
+    # (workload, scale, metric).  Preserves Welch t-test output above.
+    out_lines.append(paired_analysis(all_rows))
 
     output_text = "\n".join(out_lines)
     print(output_text)

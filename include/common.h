@@ -48,7 +48,18 @@ struct Config {
     size_t       bloom_max_bytes        = 256ULL * 1024 * 1024; // 256MB safety cap
     int          bloom_total_budget     = 2000000; // kept for compat; NOT used by allocator
 
-    double       ahlc_write_rate_high   = 5000.0;
+    // ahlc_write_rate_high: EWMA write velocity threshold τ_v, in BYTES/SEC.
+    // WriteVelocityTracker computes: instant_velocity = bytes_flushed / dt_seconds
+    // so this field must also be in bytes/sec.
+    // NOTE: At a typical MemTable flush of 4096 keys × 72 B = 295 KB, flushed in
+    // ~15–20 ms, the instantaneous velocity is ~15–20 MB/s — roughly 3000–4000×
+    // above this default. Therefore the velocity condition
+    //   (write_velocity > ahlc_write_rate_high)
+    // is almost ALWAYS satisfied during normal operation, and any_level_full is
+    // the effective gate for TIERING decisions.  This behaviour is documented via
+    // AHLC diagnostic instrumentation (see AHLCDiagnostic in ahlc.h); the value
+    // is NOT silently changed here.  Paper-level discussion belongs in the text.
+    double       ahlc_write_rate_high   = 5000.0;  // bytes/sec (see note above)
     double       ahlc_skew_threshold    = 0.65;
     int          ahlc_hysteresis_epochs = 3;
     double       ahlc_ewma_alpha        = 0.3;

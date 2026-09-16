@@ -128,9 +128,22 @@ inline YCSBWorkloadConfig workloadF(int ops = 100000) {
     uint64_t ks = std::max((uint64_t)1000000, (uint64_t)ops * 2);
     YCSBWorkloadConfig c;
     c.name = "F(50R/50RMW)"; c.num_ops = ops; c.record_count = ops/2; c.key_space = ks;
-    c.read_frac = 0.5; c.rmw_frac = 0.5;
+    // Explicitly zero all other fracs so the YCSBWorkloadConfig default update_frac=0.5
+    // does NOT bleed through.  The generateOps dispatch order is:
+    //   r < read_frac  → READ
+    //   r < read + update → UPDATE
+    //   ... (insert, scan, delete) ...
+    //   else           → RMW
+    // Without zeroing update_frac, the default 0.5 would consume all non-READ slots.
+    c.read_frac   = 0.5;
+    c.update_frac = 0.0;  // must be explicit to avoid default of 0.5
+    c.insert_frac = 0.0;
+    c.scan_frac   = 0.0;
+    c.delete_frac = 0.0;
+    c.rmw_frac    = 0.5;  // informational: remainder goes to RMW via else branch
     return c;
 }
+
 
 // ---------------------------------------------------------------------------
 // Paper-defined workload extensions — NOT part of the standard YCSB spec.

@@ -328,7 +328,7 @@ void LSMEngine::doFlush(std::vector<KVPair> sorted) {
     uint64_t id = SSTable::next_id_++;
     std::string sst_path = cfg_.db_path + "/L0_" + std::to_string(id) + ".sst";
     int bloom_bits = std::max(512, (int)(cfg_.bloom_bits_per_key * sorted.size()));
-    auto sst = SSTableBuilder::build(sst_path, id, sorted, bloom_bits, bytes_written_);
+    auto sst = SSTableBuilder::build(sst_path, id, sorted, bloom_bits, metrics_.bytes_written_flush);
 
     int bytes_flushed = sst ? (int)sst->file_size : ((int)sorted.size() * cfg_.bytes_per_kv);
 
@@ -352,7 +352,10 @@ void LSMEngine::doFlush(std::vector<KVPair> sorted) {
         }
     }
 
-    metrics_.bytes_written_sstables.store(bytes_written_.load(), std::memory_order_relaxed);
+    int64_t total_sst = metrics_.bytes_written_flush.load(std::memory_order_relaxed) +
+                        metrics_.bytes_written_compaction.load(std::memory_order_relaxed);
+    metrics_.bytes_written_sstables.store(total_sst, std::memory_order_relaxed);
+    bytes_written_.store(total_sst, std::memory_order_relaxed);
     metrics_.total_flushes.fetch_add(1, std::memory_order_relaxed);
 
     velocity_.recordFlush(bytes_flushed);
@@ -383,20 +386,23 @@ void LSMEngine::doCompaction() {
 
         switch (s) {
             case Strategy::LEVELING:
-                compactLeveling(levels_, i, cfg_.db_path, bytes_written_, cfg_.bloom_bits_per_key);
+                compactLeveling(levels_, i, cfg_.db_path, metrics_.bytes_written_compaction, cfg_.bloom_bits_per_key);
                 break;
             case Strategy::TIERING:
-                compactTiering(levels_, i, params.maxRuns, cfg_.db_path, bytes_written_, cfg_.bloom_bits_per_key);
+                compactTiering(levels_, i, params.maxRuns, cfg_.db_path, metrics_.bytes_written_compaction, cfg_.bloom_bits_per_key);
                 break;
             case Strategy::HYBRID:
                 if (i >= (int)levels_.size() - 1)
-                    compactLeveling(levels_, i, cfg_.db_path, bytes_written_, cfg_.bloom_bits_per_key);
+                    compactLeveling(levels_, i, cfg_.db_path, metrics_.bytes_written_compaction, cfg_.bloom_bits_per_key);
                 else
-                    compactTiering(levels_, i, params.maxRuns, cfg_.db_path, bytes_written_, cfg_.bloom_bits_per_key);
+                    compactTiering(levels_, i, params.maxRuns, cfg_.db_path, metrics_.bytes_written_compaction, cfg_.bloom_bits_per_key);
                 break;
         }
+        int64_t total_sst = metrics_.bytes_written_flush.load(std::memory_order_relaxed) +
+                            metrics_.bytes_written_compaction.load(std::memory_order_relaxed);
+        metrics_.bytes_written_sstables.store(total_sst, std::memory_order_relaxed);
+        bytes_written_.store(total_sst, std::memory_order_relaxed);
         metrics_.total_compactions.fetch_add(1, std::memory_order_relaxed);
-        metrics_.bytes_written_sstables.store(bytes_written_.load(), std::memory_order_relaxed);
         break; // one level per compaction round
     }
 
