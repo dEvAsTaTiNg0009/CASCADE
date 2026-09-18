@@ -16,7 +16,12 @@ Output:
 
 Statistics:
     - Mean ± sample std dev per (workload, scale, config) group
-    - Welch's t-test p-value: CASCADE vs Baseline at each (workload, scale)
+    - Paired two-tailed Student's t-test (exact, via the incomplete beta function),
+      pairing CASCADE and Baseline by matching run_id/seed.  The design is a
+      matched-pairs experiment (same seed = 42 + run_id used for all configs),
+      so pairing removes within-pair correlation from the error variance.
+      The exact t-distribution (not a normal approximation) is used because
+      n is typically only 3–5.
     - Outlier column preserved from CSV (flagged but not dropped)
 
 This script is designed so a reviewer can verify every table in the paper
@@ -48,7 +53,12 @@ def stddev(vals: List[float]) -> float:
 
 
 def welch_t_test(a: List[float], b: List[float]) -> float:
-    """Two-tailed Welch t-test p-value (normal approximation for large df)."""
+    """Two-tailed Welch t-test p-value (normal approximation for large df).
+
+    Retained for reference and for use with non-paired data (e.g. RocksDB
+    comparisons where run_id pairing is not available).  For CASCADE vs
+    Baseline comparisons use paired_t_test() instead — see module docstring.
+    """
     if len(a) < 2 or len(b) < 2:
         return 1.0
     ma, mb = mean(a), mean(b)
@@ -63,6 +73,92 @@ def welch_t_test(a: List[float], b: List[float]) -> float:
     # Normal approximation: erf(t/sqrt(2))
     p = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(t / math.sqrt(2.0))))
     return max(0.0001, min(1.0, p))
+
+
+# ---------------------------------------------------------------------------
+# Exact paired t-test via the regularized incomplete beta function.
+#
+# References:
+#   Numerical Recipes §6.4 (betacf — Lentz's continued-fraction algorithm)
+#   DLMF §8.17 (regularized incomplete beta I_x(a,b))
+#   Student (1908) — two-tailed p = I_x(df/2, 1/2)  where x = df/(df+t²)
+# ---------------------------------------------------------------------------
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Lentz's continued-fraction expansion for the incomplete beta function."""
+    MAXIT, EPS, FPMIN = 200, 3e-14, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN: d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN: d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN: c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN: d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN: c = FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS: break
+    return h
+
+
+def _betai(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b) via _betacf."""
+    if x <= 0.0: return 0.0
+    if x >= 1.0: return 1.0
+    lbeta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+             + a * math.log(x) + b * math.log(1.0 - x))
+    bt = math.exp(lbeta)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_two_tailed_p(t: float, df: int) -> float:
+    """Exact two-tailed p-value for Student's t-distribution with df degrees of freedom.
+
+    Uses the regularized incomplete beta function: p = I_x(df/2, 0.5)
+    where x = df / (df + t²).  Accurate for small df (n=3–5) unlike the
+    normal approximation used in welch_t_test.
+    """
+    if df <= 0: return 1.0
+    x = df / (df + t * t)
+    return _betai(df / 2.0, 0.5, x)
+
+
+def paired_t_test(a: List[float], b: List[float]) -> float:
+    """Exact two-tailed paired t-test p-value.
+
+    a and b must be index-aligned by run_id (same seed pair): element i of a
+    was produced by the same seed as element i of b.  Uses the within-pair
+    differences d_i = a_i - b_i, which removes between-run variance that is
+    common to both configurations.
+
+    Returns p in [0.0001, 1.0].  Returns 1.0 if pairing is impossible (n < 2
+    or len(a) != len(b)).  Returns a small non-zero value when all differences
+    are identical but non-zero (deterministic superiority).
+    """
+    if len(a) != len(b) or len(a) < 2:
+        return 1.0
+    diffs = [x - y for x, y in zip(a, b)]
+    n = len(diffs)
+    md, sd = mean(diffs), stddev(diffs)
+    if sd < 1e-12:
+        return 1.0 if abs(md) < 1e-9 else 0.0001
+    t = md / (sd / math.sqrt(n))
+    return max(0.0001, min(1.0, student_t_two_tailed_p(abs(t), df=n - 1)))
 
 
 def mann_whitney_u(a: List[float], b: List[float]) -> Tuple[float, float]:
@@ -172,14 +268,14 @@ def generate_main_table(rows: List[Dict], scale: int, rdb_rows: List[Dict] = Non
     repeats = len(set(r['run_id'] for r in rows if r['scale'] == scale)) if rows else 0
     has_rdb = rdb_rows and any(r['scale'] == scale for r in rdb_rows)
 
-    lines.append(f"\n### Scale {sc_str} — {repeats} repeat(s), mean ± std, Welch t-test")
+    lines.append(f"\n### Scale {sc_str} — {repeats} repeat(s), mean ± std, paired t-test")
     lines.append("")
 
     if has_rdb:
-        lines.append("| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | RocksDB (Mean ± Std) | Diff vs Baseline (%) | Diff vs RocksDB (%) | Welch p | Sig (p<0.05) |")
+        lines.append("| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | RocksDB (Mean ± Std) | Diff vs Baseline (%) | Diff vs RocksDB (%) | paired p | Sig (p<0.05) |")
         lines.append("|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
     else:
-        lines.append("| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Welch p | Sig (p<0.05) |")
+        lines.append("| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | paired p | Sig (p<0.05) |")
         lines.append("|:---|:---|:---:|:---:|:---:|:---:|:---:|")
 
     scale_rows = [r for r in rows if r['scale'] == scale]
@@ -201,6 +297,13 @@ def generate_main_table(rows: List[Dict], scale: int, rdb_rows: List[Dict] = Non
         if has_outlier:
             lines.append(f"> ⚠️ Outlier flagged in {wl} at {sc_str} — NOT dropped, included in all aggregates.")
 
+        # Build run_id-keyed dicts for paired testing.
+        # Pairing by run_id guarantees same seed (seed = 42 + run_id) for both
+        # configurations, satisfying the matched-pairs assumption.
+        base_by_rid = {r['run_id']: r for r in base_vals}
+        casc_by_rid = {r['run_id']: r for r in casc_vals}
+        paired_ids  = sorted(base_by_rid.keys() & casc_by_rid.keys())
+
         for metric, field in [
             ("Throughput (Kops/s)", lambda r: r['throughput_ops_s'] / 1000.0),
             ("WAF",                 lambda r: r['waf']),
@@ -215,7 +318,14 @@ def generate_main_table(rows: List[Dict], scale: int, rdb_rows: List[Dict] = Non
             diff_str = f"{'+' if diff >= 0 else ''}{diff:.1f}%"
 
             if metric == "Throughput (Kops/s)":
-                p = welch_t_test(bv, cv)
+                # Paired t-test: align CASCADE and Baseline by run_id (same seed pair).
+                # Falls back to welch_t_test if no common run_ids exist (e.g. partial data).
+                if paired_ids:
+                    cv_paired = [field(casc_by_rid[rid]) for rid in paired_ids]
+                    bv_paired = [field(base_by_rid[rid]) for rid in paired_ids]
+                    p = paired_t_test(cv_paired, bv_paired)
+                else:
+                    p = welch_t_test(bv, cv)  # fallback for unpaired partial data
                 _, _ = mann_whitney_u(bv, cv)
                 sig = "**Yes**" if p < 0.05 else "No"
                 p_str = f"p={p:.4f}"
@@ -413,7 +523,9 @@ def main():
         "- **6 scales**: 100K / 500K / 1M / 5M / 10M / 15M",
         "- **Repeats**: 5 at 100K–5M; 3 at 10M and 15M (wall-clock budget reduction — stated explicitly)",
         "- **Seed**: `generateOps(seed = 42 + run_id)` — same seed per run_id across all 11 workloads",
-        "- **Statistics**: Welch's t-test (two-tailed, normal approximation) + Mann-Whitney U",
+        "- **Statistics**: Paired two-tailed Student's t-test (exact, via the incomplete beta function), "
+        "pairing CASCADE and Baseline by matching run_id/seed. "
+        "Welch's t-test retained for reference in welch_t_test(); Mann-Whitney U also computed.",
         "- **RAF definition**: `sstable_block_reads / total_reads`.",
         "  One block = one 4KB `pread()` call to the OS (cache hits not counted).",
         "",
@@ -442,20 +554,30 @@ def main():
         ordered_wls = [w for w in WORKLOAD_ORDER if w in wl_names_seen]
         ordered_wls += [w for w in wl_names_seen if w not in ordered_wls]
 
-        out_lines.append("| Workload | Scale | Baseline Tput (Kops/s) | CASCADE Tput (Kops/s) | RocksDB Tput (Kops/s) | Diff vs Baseline (%) | Diff vs RocksDB (%) | p-value | Sig |")
+        out_lines.append("| Workload | Scale | Baseline Tput (Kops/s) | CASCADE Tput (Kops/s) | RocksDB Tput (Kops/s) | Diff vs Baseline (%) | Diff vs RocksDB (%) | paired p | Sig |")
         out_lines.append("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
         for wl in ordered_wls:
             for sc in scales_present:
                 sc_str = format_scale(sc)
-                bv = [r['throughput_ops_s']/1000 for r in all_rows
-                      if r['workload']==wl and r['scale']==sc and r['config']=='Baseline']
-                cv = [r['throughput_ops_s']/1000 for r in all_rows
-                      if r['workload']==wl and r['scale']==sc and r['config']=='CASCADE']
+                sc_wl_rows = [r for r in all_rows if r['workload'] == wl and r['scale'] == sc]
+                base_rows_sw = [r for r in sc_wl_rows if r['config'] == 'Baseline']
+                casc_rows_sw = [r for r in sc_wl_rows if r['config'] == 'CASCADE']
+                bv = [r['throughput_ops_s'] / 1000 for r in base_rows_sw]
+                cv = [r['throughput_ops_s'] / 1000 for r in casc_rows_sw]
                 if not bv or not cv:
                     continue
                 bm, cm = mean(bv), mean(cv)
                 diff = ((cm - bm) / bm * 100) if bm > 0 else 0.0
-                p = welch_t_test(bv, cv)
+                # Paired t-test aligned by run_id (same seed per run_id across configs).
+                base_by_rid_sw = {r['run_id']: r for r in base_rows_sw}
+                casc_by_rid_sw = {r['run_id']: r for r in casc_rows_sw}
+                paired_ids_sw  = sorted(base_by_rid_sw.keys() & casc_by_rid_sw.keys())
+                if paired_ids_sw:
+                    cv_p = [casc_by_rid_sw[rid]['throughput_ops_s'] / 1000 for rid in paired_ids_sw]
+                    bv_p = [base_by_rid_sw[rid]['throughput_ops_s'] / 1000 for rid in paired_ids_sw]
+                    p = paired_t_test(cv_p, bv_p)
+                else:
+                    p = welch_t_test(bv, cv)  # fallback for unpaired partial data
                 sig = "**Yes**" if p < 0.05 else "No"
 
                 rdb_sc = [r for r in (rdb_rows or []) if r['scale'] == sc and r['workload'] == wl]

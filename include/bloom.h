@@ -35,6 +35,7 @@ public:
 
     int  totalBits()   const { return (int)blocks_.size() * 8; }
     int  hashCount()   const { return k_; }  // number of hash functions (k_)
+    int  numHashes()   const { return k_; }  // alias for hashCount()
     int  elementCount() const { return n_; }
     int  numElements() const { return n_; }
     double fpr()       const; // theoretical FPR = (1 - e^(-k*n/m))^k

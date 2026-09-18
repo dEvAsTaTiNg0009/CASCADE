@@ -757,8 +757,108 @@ void testGiniComplexity() {
 }
 
 // ---------------------------------------------------------------------------
-// MAIN
+// Test 14: Bloom k matches optimalBloomK() at construction and after rebuildBlooms()
+//
+// Guards against a future refactor silently reintroducing a stale/hardcoded k.
+// Exercises both the adaptive path (bloom_adaptive_enabled=true, default) and
+// the static uniform path (bloom_adaptive_enabled=false).
 // ---------------------------------------------------------------------------
+void testBloomKInvariant() {
+    std::cout << "\n== Test 14: Bloom k Invariant (numHashes == optimalBloomK) ==\n";
+
+    // --- Scenario A: adaptive path (default) ---
+    // After construction + flush + compaction, all filters must have k = optimalBloomK(bpk).
+    {
+        std::string dir = "./data_bloom_k_test_adaptive";
+        (void)system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+        Config cfg;
+        cfg.db_path             = dir;
+        cfg.memtable_capacity   = 256;
+        cfg.bloom_bits_per_key  = 14;
+        cfg.bloom_adaptive_enabled = true;  // explicit (also the default)
+
+        int k_expected = optimalBloomK(cfg.bloom_bits_per_key);
+        std::cout << "  [INFO] bloom_bits_per_key=" << cfg.bloom_bits_per_key
+                  << "  k_expected=" << k_expected << " (optimalBloomK)\n";
+
+        {
+            LSMEngine engine(cfg);
+
+            // Insert enough keys to trigger at least one flush → rebuildBlooms().
+            const int N = 1500;
+            for (int i = 1; i <= N; i++)
+                engine.insert((Key)i, "v" + std::to_string(i));
+            engine.flush();
+            // Allow background compaction to run (which also calls rebuildBlooms()).
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            bool ok = engine.verifyBloomKInvariant();
+            CHECK(ok, "Adaptive path: all bloom_filters_[i].numHashes() == optimalBloomK(bpk)");
+        }
+
+        (void)system(("rm -rf " + dir).c_str());
+    }
+
+    // --- Scenario B: static uniform path (bloom_adaptive_enabled=false) ---
+    // After construction + flush, filters are sized once by staticUniformBloomInit().
+    // k must still equal optimalBloomK(bpk) — the static path must not hardcode k.
+    {
+        std::string dir = "./data_bloom_k_test_static";
+        (void)system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+        Config cfg;
+        cfg.db_path             = dir;
+        cfg.memtable_capacity   = 256;
+        cfg.bloom_bits_per_key  = 14;
+        cfg.bloom_adaptive_enabled = false;  // static uniform path
+
+        {
+            LSMEngine engine(cfg);
+
+            const int N = 1500;
+            for (int i = 1; i <= N; i++)
+                engine.insert((Key)i, "v" + std::to_string(i));
+            engine.flush();
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            bool ok = engine.verifyBloomKInvariant();
+            CHECK(ok, "Static uniform path: all bloom_filters_[i].numHashes() == optimalBloomK(bpk)");
+        }
+
+        (void)system(("rm -rf " + dir).c_str());
+    }
+
+    // --- Scenario C: change bpk — invariant must hold for any bpk value ---
+    {
+        std::string dir = "./data_bloom_k_test_bpk10";
+        (void)system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+        Config cfg;
+        cfg.db_path             = dir;
+        cfg.memtable_capacity   = 256;
+        cfg.bloom_bits_per_key  = 10;  // k_opt = optimalBloomK(10) = 7
+
+        {
+            LSMEngine engine(cfg);
+
+            const int N = 800;
+            for (int i = 1; i <= N; i++)
+                engine.insert((Key)i, "v" + std::to_string(i));
+            engine.flush();
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            int k10 = optimalBloomK(10);
+            CHECK(k10 == 7, "optimalBloomK(10) = 7");
+            bool ok = engine.verifyBloomKInvariant();
+            CHECK(ok, "bpk=10: all bloom_filters_[i].numHashes() == optimalBloomK(10)=7");
+        }
+
+        (void)system(("rm -rf " + dir).c_str());
+    }
+}
+
+
 int main() {
     std::cout << "\n";
     std::cout << "  +=====================================================+\n";
@@ -780,6 +880,7 @@ int main() {
     testWAFAccounting();            // STEP 11: WAF component decomposition
     testBloomHashCount();           // STEP 2B: k_ correctness after rebuild
     testGiniComplexity();           // STEP 3: Gini O(n log n) formula
+    testBloomKInvariant();          // Part 2: numHashes() == optimalBloomK() after construction + rebuild
 
     std::cout << "\n  +---------------------------------------------+\n";
     std::cout << "  |  Results: " << passed << " passed, " << failed << " failed\n";

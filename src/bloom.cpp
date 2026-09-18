@@ -238,11 +238,21 @@ void BloomAllocator::reallocateStructural(
 
     // Optimal k from configured bits_per_key — applied uniformly since the
     // per-level bits/key ratio is close to bits_per_key by construction.
+    //
+    // INVARIANT: k_opt MUST always come from optimalBloomK(bits_per_key).
+    // Do NOT replace this with a hardcoded constant or a stale cached value.
+    // rebuild(bits, k_opt) below sets k_ on the live filter; if k diverges from
+    // optimalBloomK() the FPR model in BlockedBloomFilter::fpr() and all
+    // paper-reported FPR numbers will be incorrect.  LSMEngine::verifyBloomKInvariant()
+    // asserts this post-condition after every rebuildBlooms() call in the test suite.
     int k_opt = optimalBloomK(bits_per_key);
 
     for (int i = 0; i < L; i++) {
         int bits = (int)alloc[i];
-        // rebuild(bits, k_opt) clears the filter AND sets k_ to the optimal value.
+        // rebuild(bits, k_opt): clears the filter AND sets k_ = optimalBloomK().
+        // This is the single authoritative place where k_ is written after initial
+        // construction — rebuild() never touches k_ unless the two-arg overload
+        // is used, so a future refactor must keep this two-arg form.
         filters[i].rebuild(bits, k_opt);
         for (auto& run : levels[i])
             for (auto& kv : run)
@@ -328,6 +338,8 @@ void BloomAllocator::reallocateStructural(
     target_budget = std::max(target_budget, (int64_t)L * 512);
 
     auto alloc = allocateWithBudget(counts, target_budget, bits_per_key);
+    // INVARIANT: k_opt MUST always come from optimalBloomK(bits_per_key).
+    // See the KVPair overload above for the full rationale.
     int k_opt  = optimalBloomK(bits_per_key);
 
     for (int i = 0; i < L; i++) {

@@ -8,6 +8,11 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+// Define CASCADE_DEBUG_BLOOM_K at compile time to enable per-rebuild
+// diagnostics that print cfg.bloom_bits_per_key and each filter's numHashes().
+// Example: g++ -DCASCADE_DEBUG_BLOOM_K ...
+// This is zero-cost (compiled out entirely) in production builds.
+
 using namespace std::chrono;
 
 namespace cascade {
@@ -414,9 +419,23 @@ void LSMEngine::doCompaction() {
 }
 
 // ---------------------------------------------------------------------------
-// BLOOM REBUILD — dual-trigger
+// BLOOM REBUILD — dual-trigger (adaptive) or one-shot static (uniform)
 // ---------------------------------------------------------------------------
 void LSMEngine::rebuildBlooms() {
+    // Static uniform path: size filters once from bloom_bits_per_key, never
+    // re-triggered by AHLC switches or access-frequency drift.  This is the
+    // "Uniform" dimension in the ablation study.  blooms_initialized_ ensures
+    // the sizing only runs once per LSMEngine lifetime.
+    if (!cfg_.bloom_adaptive_enabled) {
+        if (!blooms_initialized_) {
+            staticUniformBloomInit();
+            blooms_initialized_ = true;
+        }
+        return;
+    }
+
+    // Adaptive path: dual-trigger reallocation driven by structural changes
+    // (level sizes) and access-frequency counters (hot-level bonus).
     while ((int)access_trackers_.size() < (int)levels_.size())
         access_trackers_.emplace_back();
     while ((int)bloom_filters_.size() < (int)levels_.size())
@@ -426,9 +445,65 @@ void LSMEngine::rebuildBlooms() {
                                          cfg_.bloom_bits_per_key,
                                          cfg_.bloom_max_bytes);
 
+#ifdef CASCADE_DEBUG_BLOOM_K
+    // Debug-only: verify that every filter's k matches optimalBloomK() after
+    // reallocateStructural() runs.  This is a zero-cost guard in production.
+    {
+        int k_expected = optimalBloomK(cfg_.bloom_bits_per_key);
+        std::cerr << "[CASCADE_DEBUG_BLOOM_K] bpk=" << cfg_.bloom_bits_per_key
+                  << " k_expected=" << k_expected << "\n";
+        for (int i = 0; i < (int)bloom_filters_.size(); i++) {
+            std::cerr << "  level[" << i << "] numHashes()="
+                      << bloom_filters_[i].numHashes() << "\n";
+        }
+    }
+#endif // CASCADE_DEBUG_BLOOM_K
+
     if ((int)access_trackers_.size() >= (int)bloom_filters_.size())
         BloomAllocator::reallocateFrequency(bloom_filters_, access_trackers_,
                                             levels_, cfg_.bloom_bits_per_key);
+}
+
+// ---------------------------------------------------------------------------
+// STATIC UNIFORM BLOOM INIT — one-shot sizing for bloom_adaptive_enabled=false
+//
+// Sizes every level's filter exactly once using:
+//   bits = max(512, bloom_bits_per_key * |L_i|)  capped at bloom_max_bytes
+//   k    = optimalBloomK(bloom_bits_per_key)
+//
+// This is intentionally NOT triggered again by AHLC switches or access drift,
+// matching the "Uniform" ablation dimension semantics: the filter is sized from
+// the current level population at construction time and then frozen.
+// ---------------------------------------------------------------------------
+void LSMEngine::staticUniformBloomInit() {
+    int L = (int)levels_.size();
+    while ((int)bloom_filters_.size() < L)
+        bloom_filters_.emplace_back(512, optimalBloomK(cfg_.bloom_bits_per_key));
+
+    int k_opt = optimalBloomK(cfg_.bloom_bits_per_key);
+    int64_t max_bits = (int64_t)cfg_.bloom_max_bytes * 8;
+
+    for (int i = 0; i < L; i++) {
+        int count = 0;
+        for (auto& sst : levels_[i])
+            if (sst) count += sst->numEntries();
+
+        // bits = bloom_bits_per_key * count, floored at 512, capped at max_bits
+        int64_t bits = std::max((int64_t)512,
+                                (int64_t)cfg_.bloom_bits_per_key * count);
+        bits = std::min(bits, max_bits);
+
+        // rebuild(bits, k_opt) clears the filter and sets k_ = optimalBloomK().
+        // DO NOT pass a hardcoded constant here — always use optimalBloomK() so
+        // the k/bits contract is preserved even if bits_per_key changes.
+        bloom_filters_[i].rebuild((int)bits, k_opt);
+        for (auto& sst : levels_[i]) {
+            if (!sst) continue;
+            auto pairs = sst->readAll();
+            for (auto& kv : pairs)
+                bloom_filters_[i].add(kv.key);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +529,31 @@ int LSMEngine::countPhysicalKeys() const {
 void LSMEngine::printMetrics(const std::string& label, double elapsed_sec) {
     metrics_.physical_keys_on_disk.store(countPhysicalKeys(), std::memory_order_relaxed);
     metrics_.print(label, elapsed_sec);
+}
+
+// ---------------------------------------------------------------------------
+// BLOOM K INVARIANT CHECK
+//
+// Asserts that every Bloom filter's hash count k_ equals optimalBloomK() for
+// the configured bits_per_key.  This is always true by construction:
+//   - Construction: bloom_filters_.emplace_back(512, optimalBloomK(...))
+//   - reallocateStructural(): calls rebuild(bits, k_opt) with k_opt = optimalBloomK()
+//   - staticUniformBloomInit(): calls rebuild(bits, k_opt) with k_opt = optimalBloomK()
+// This method exists so a future refactor cannot silently break this invariant
+// while "cleaning up" what might look like redundant k computations.
+// ---------------------------------------------------------------------------
+bool LSMEngine::verifyBloomKInvariant() const {
+    int k_expected = optimalBloomK(cfg_.bloom_bits_per_key);
+    for (int i = 0; i < (int)bloom_filters_.size(); i++) {
+        if (bloom_filters_[i].numHashes() != k_expected) {
+            std::cerr << "[verifyBloomKInvariant] FAIL: level " << i
+                      << " numHashes()=" << bloom_filters_[i].numHashes()
+                      << " expected=" << k_expected
+                      << " (bpk=" << cfg_.bloom_bits_per_key << ")\n";
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace cascade

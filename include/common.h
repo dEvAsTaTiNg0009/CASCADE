@@ -46,7 +46,14 @@ struct Config {
     //   bpk=20, k=14 -> std 0.007%,measured blocked ~0.05% (high accuracy, more RAM)
     int          bloom_bits_per_key     = 14;  // bits per key per level (14 → FPR ≈ 1%)
     size_t       bloom_max_bytes        = 256ULL * 1024 * 1024; // 256MB safety cap
-    int          bloom_total_budget     = 2000000; // kept for compat; NOT used by allocator
+    // bloom_adaptive_enabled: controls Bloom reallocation strategy.
+    //   true  (default) — dual-trigger adaptive realloc (structural + frequency)
+    //                      driven by AHLC switches and per-level access counters.
+    //   false           — static uniform init: every level sized once from
+    //                      bloom_bits_per_key at startup; never re-triggered.
+    // In the ablation study, "Adaptive" rows set this to true and "Uniform" rows
+    // set it to false, creating a genuinely different Bloom allocation path.
+    bool         bloom_adaptive_enabled  = true;
 
     // ahlc_write_rate_high: EWMA write velocity threshold τ_v, in BYTES/SEC.
     // WriteVelocityTracker computes: instant_velocity = bytes_flushed / dt_seconds

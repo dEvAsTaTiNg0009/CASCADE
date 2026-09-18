@@ -45,6 +45,11 @@ public:
     AHLCEngine&    ahlc() { return ahlc_; }
     BlockCache&    blockCache() { return *block_cache_; }
 
+    // Verifies that every Bloom filter's hash count equals optimalBloomK(cfg.bloom_bits_per_key).
+    // Used by the test suite (Test 14) and for runtime regression checking.
+    // Returns true iff all filters are consistent with the configured bits_per_key.
+    bool verifyBloomKInvariant() const;
+
 private:
     Config                cfg_;
 
@@ -91,11 +96,16 @@ private:
     void doFlush(std::vector<KVPair> sorted);
     void doCompaction();
     void rebuildBlooms();
+    void staticUniformBloomInit();  // one-shot static Bloom init for bloom_adaptive_enabled=false
     bool isLevelFull(int level) const;
     int  countPhysicalKeys() const;
     void backgroundLoop();
     void requestCompaction();
     void loadExistingSSTables();
+
+    // Set to true after the first staticUniformBloomInit() call so the static
+    // path is never re-entered for the lifetime of this LSMEngine instance.
+    bool blooms_initialized_ = false;
 };
 
 } // namespace cascade
