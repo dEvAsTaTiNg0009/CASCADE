@@ -8,6 +8,7 @@
 #include <utility>
 #include <limits>
 #include <atomic>
+#include <algorithm>
 
 namespace cascade {
 
@@ -49,8 +50,8 @@ struct Config {
     // bloom_adaptive_enabled: controls Bloom reallocation strategy.
     //   true  (default) — dual-trigger adaptive realloc (structural + frequency)
     //                      driven by AHLC switches and per-level access counters.
-    //   false           — static uniform init: every level sized once from
-    //                      bloom_bits_per_key at startup; never re-triggered.
+    //   false           — uniform allocation: every level uses the same
+    //                      bits-per-key policy; contents rebuild on changes.
     // In the ablation study, "Adaptive" rows set this to true and "Uniform" rows
     // set it to false, creating a genuinely different Bloom allocation path.
     bool         bloom_adaptive_enabled  = true;

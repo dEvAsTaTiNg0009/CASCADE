@@ -161,7 +161,8 @@ void compactLeveling(std::vector<SSTableLevel>& levels, int level,
     uint64_t id = SSTable::next_id_++;
     std::string sst_path = db_path + "/L" + std::to_string(nextLevel) + "_" + std::to_string(id) + ".sst";
     int bloom_bits = std::max(512, (int)(bloom_bits_per_key * merged.size()));
-    auto new_sst = SSTableBuilder::build(sst_path, id, merged, bloom_bits, bytes_written);
+    auto new_sst = SSTableBuilder::build(sst_path, id, merged, bloom_bits,
+                                         bytes_written, optimalBloomK(bloom_bits_per_key));
 
     for (auto& sst : to_delete) {
         sst->removeFile();
@@ -204,7 +205,8 @@ void compactTiering(std::vector<SSTableLevel>& levels, int level, int maxRuns,
     uint64_t id = SSTable::next_id_++;
     std::string sst_path = db_path + "/L" + std::to_string(nextLevel) + "_" + std::to_string(id) + ".sst";
     int bloom_bits = std::max(512, (int)(bloom_bits_per_key * merged.size()));
-    auto new_sst = SSTableBuilder::build(sst_path, id, merged, bloom_bits, bytes_written);
+    auto new_sst = SSTableBuilder::build(sst_path, id, merged, bloom_bits,
+                                         bytes_written, optimalBloomK(bloom_bits_per_key));
 
     for (auto& sst : to_delete) {
         sst->removeFile();
@@ -248,7 +250,8 @@ void compactSubRange(std::vector<SSTableLevel>& levels, int level,
     uint64_t id = SSTable::next_id_++;
     std::string sst_path = db_path + "/L" + std::to_string(nextLevel) + "_" + std::to_string(id) + ".sst";
     int bloom_bits = std::max(512, (int)(bloom_bits_per_key * merged.size()));
-    auto new_sst = SSTableBuilder::build(sst_path, id, merged, bloom_bits, bytes_written);
+    auto new_sst = SSTableBuilder::build(sst_path, id, merged, bloom_bits,
+                                         bytes_written, optimalBloomK(bloom_bits_per_key));
 
     for (auto& sst : to_delete) {
         sst->removeFile();

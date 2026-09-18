@@ -1,8 +1,8 @@
-### YCSB Benchmark Summary — Scale 500K (500000 ops, 3 repeats, mean ± std, Welch t-test p-value)
+### YCSB Benchmark Summary — Scale 500K (500000 ops, 3 repeats, mean ± std, paired t-test p-value)
 
 > **direct-io=true**: page cache bypassed (macOS F_NOCACHE / Linux O_DIRECT)
 
-| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Welch t p | Sig (p<0.05) |
+| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | paired t p | Sig (p<0.05) |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **A(50R/50U)** | Throughput (Kops/s) | 607.4 ± 17.0 | 556.8 ± 13.1 | -8.3% | U=0 | p=0.0001 | **Yes** |
 | | WAF | 6.47 ± 0.00 | 7.94 ± 0.01 | +22.7% | - | - | - |

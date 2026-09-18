@@ -100,7 +100,8 @@ public:
         uint64_t id,
         const std::vector<KVPair>& sorted_run,
         int bloom_bits,
-        std::atomic<int64_t>& bytes_written_counter);
+        std::atomic<int64_t>& bytes_written_counter,
+        int bloom_k = optimalBloomK(14));
 
     // Backward-compatible overload
     static std::shared_ptr<SSTable> build(

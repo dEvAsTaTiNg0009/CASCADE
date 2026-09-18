@@ -52,29 +52,6 @@ def stddev(vals: List[float]) -> float:
     return math.sqrt(sum((v - m) ** 2 for v in vals) / (len(vals) - 1))
 
 
-def welch_t_test(a: List[float], b: List[float]) -> float:
-    """Two-tailed Welch t-test p-value (normal approximation for large df).
-
-    Retained for reference and for use with non-paired data (e.g. RocksDB
-    comparisons where run_id pairing is not available).  For CASCADE vs
-    Baseline comparisons use paired_t_test() instead — see module docstring.
-    """
-    if len(a) < 2 or len(b) < 2:
-        return 1.0
-    ma, mb = mean(a), mean(b)
-    sa, sb = stddev(a), stddev(b)
-    na, nb = len(a), len(b)
-    v1 = (sa ** 2) / na
-    v2 = (sb ** 2) / nb
-    denom = math.sqrt(v1 + v2)
-    if denom < 1e-12:
-        return 1.0 if abs(ma - mb) < 1e-6 else 0.001
-    t = abs(ma - mb) / denom
-    # Normal approximation: erf(t/sqrt(2))
-    p = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(t / math.sqrt(2.0))))
-    return max(0.0001, min(1.0, p))
-
-
 # ---------------------------------------------------------------------------
 # Exact paired t-test via the regularized incomplete beta function.
 #
@@ -131,7 +108,7 @@ def student_t_two_tailed_p(t: float, df: int) -> float:
 
     Uses the regularized incomplete beta function: p = I_x(df/2, 0.5)
     where x = df / (df + t²).  Accurate for small df (n=3–5) unlike the
-    normal approximation used in welch_t_test.
+    exact Student's t inference rather than a normal approximation.
     """
     if df <= 0: return 1.0
     x = df / (df + t * t)
@@ -159,6 +136,25 @@ def paired_t_test(a: List[float], b: List[float]) -> float:
         return 1.0 if abs(md) < 1e-9 else 0.0001
     t = md / (sd / math.sqrt(n))
     return max(0.0001, min(1.0, student_t_two_tailed_p(abs(t), df=n - 1)))
+
+
+def require_complete_pairing(base_rows: List[Dict], cascade_rows: List[Dict],
+                             context: str) -> List[int]:
+    """Return sorted matched run IDs or fail loudly for the primary comparison."""
+    base_ids = [r['run_id'] for r in base_rows]
+    cascade_ids = [r['run_id'] for r in cascade_rows]
+    if len(base_ids) != len(set(base_ids)) or len(cascade_ids) != len(set(cascade_ids)):
+        raise ValueError(f"Duplicate run_id in paired comparison: {context}")
+    base_set, cascade_set = set(base_ids), set(cascade_ids)
+    if base_set != cascade_set:
+        missing_base = sorted(cascade_set - base_set)
+        missing_cascade = sorted(base_set - cascade_set)
+        raise ValueError(
+            f"Incomplete CASCADE/Baseline pairing for {context}; "
+            f"missing Baseline IDs={missing_base}, missing CASCADE IDs={missing_cascade}")
+    if len(base_set) < 2:
+        raise ValueError(f"At least two matched runs are required for {context}")
+    return sorted(base_set)
 
 
 def mann_whitney_u(a: List[float], b: List[float]) -> Tuple[float, float]:
@@ -300,9 +296,10 @@ def generate_main_table(rows: List[Dict], scale: int, rdb_rows: List[Dict] = Non
         # Build run_id-keyed dicts for paired testing.
         # Pairing by run_id guarantees same seed (seed = 42 + run_id) for both
         # configurations, satisfying the matched-pairs assumption.
+        paired_ids = require_complete_pairing(base_vals, casc_vals,
+                              f"{wl} at {sc_str}")
         base_by_rid = {r['run_id']: r for r in base_vals}
         casc_by_rid = {r['run_id']: r for r in casc_vals}
-        paired_ids  = sorted(base_by_rid.keys() & casc_by_rid.keys())
 
         for metric, field in [
             ("Throughput (Kops/s)", lambda r: r['throughput_ops_s'] / 1000.0),
@@ -318,14 +315,9 @@ def generate_main_table(rows: List[Dict], scale: int, rdb_rows: List[Dict] = Non
             diff_str = f"{'+' if diff >= 0 else ''}{diff:.1f}%"
 
             if metric == "Throughput (Kops/s)":
-                # Paired t-test: align CASCADE and Baseline by run_id (same seed pair).
-                # Falls back to welch_t_test if no common run_ids exist (e.g. partial data).
-                if paired_ids:
-                    cv_paired = [field(casc_by_rid[rid]) for rid in paired_ids]
-                    bv_paired = [field(base_by_rid[rid]) for rid in paired_ids]
-                    p = paired_t_test(cv_paired, bv_paired)
-                else:
-                    p = welch_t_test(bv, cv)  # fallback for unpaired partial data
+                cv_paired = [field(casc_by_rid[rid]) for rid in paired_ids]
+                bv_paired = [field(base_by_rid[rid]) for rid in paired_ids]
+                p = paired_t_test(cv_paired, bv_paired)
                 _, _ = mann_whitney_u(bv, cv)
                 sig = "**Yes**" if p < 0.05 else "No"
                 p_str = f"p={p:.4f}"
@@ -397,13 +389,12 @@ def paired_analysis(rows: List[Dict]) -> str:
       - D_r = metric_CASCADE_r - metric_Baseline_r
       - Reports mean(D), std(D), and 95% CI (two-tailed t via normal approx).
 
-    This is a stricter test than Welch's t-test when the same run_id seed
+    This is the required matched-pairs test when the same run_id seed
     produces identical I/O patterns across systems (common here since
     seed = 42 + run_id for all workloads in all configs).
 
     NOTE: With n=3 repeats, CIs are wide and should be interpreted qualitatively.
-    With n=5 repeats, the CIs are still approximate (normal approx to t-dist
-    with df=4) but more informative.
+    With n=5 repeats, the exact t critical value uses df=4.
     """
     if not rows:
         return "*No data for paired analysis*"
@@ -420,7 +411,7 @@ def paired_analysis(rows: List[Dict]) -> str:
     def t_critical(df: int) -> float:
         if df <= 0: return float('inf')
         if df in t_crit: return t_crit[df]
-        # Normal approx for large df
+        # The benchmark currently uses at most five repeats.
         return 1.96
 
     lines = [
@@ -439,22 +430,26 @@ def paired_analysis(rows: List[Dict]) -> str:
     for sc in scales_present:
         sc_str = format_scale(sc)
         sc_rows = [r for r in rows if r['scale'] == sc]
-        run_ids = sorted(set(r['run_id'] for r in sc_rows))
-        n = len(run_ids)
-
+        n = len(set(r['run_id'] for r in sc_rows))
         lines.append(f"### Scale {sc_str} — n={n} paired runs")
         lines.append("")
         lines.append("| Workload | Metric | Mean(D) | Std(D) | 95% CI | n |")
         lines.append("|:---|:---|:---:|:---:|:---:|:---:|")
 
         for wl in ordered_wls:
+            base_wl = [r for r in sc_rows if r['workload'] == wl and r['config'] == 'Baseline']
+            casc_wl = [r for r in sc_rows if r['workload'] == wl and r['config'] == 'CASCADE']
+            if not base_wl and not casc_wl:
+                continue
+            wl_run_ids = require_complete_pairing(base_wl, casc_wl,
+                                                  f"{wl} at {sc_str}")
             for metric, field, unit in [
                 ("Throughput", lambda r: r['throughput_ops_s'] / 1000.0, "Kops/s"),
                 ("WAF",        lambda r: r['waf'],                       ""),
                 ("P99",        lambda r: r['p99_us'],                    "µs"),
             ]:
                 diffs = []
-                for rid in run_ids:
+                for rid in wl_run_ids:
                     base_r = [r for r in sc_rows if r['workload'] == wl and r['config'] == 'Baseline' and r['run_id'] == rid]
                     casc_r = [r for r in sc_rows if r['workload'] == wl and r['config'] == 'CASCADE'  and r['run_id'] == rid]
                     if base_r and casc_r:
@@ -520,12 +515,12 @@ def main():
         "## Methodology Notes",
         "",
         "- **11 workloads**: Standard YCSB A–F + paper-defined W, RW, RSW, RS, R",
-        "- **6 scales**: 100K / 500K / 1M / 5M / 10M / 15M",
+        "- **7 scales**: 100K / 500K / 1M / 3M / 5M / 10M / 15M",
         "- **Repeats**: 5 at 100K–5M; 3 at 10M and 15M (wall-clock budget reduction — stated explicitly)",
         "- **Seed**: `generateOps(seed = 42 + run_id)` — same seed per run_id across all 11 workloads",
         "- **Statistics**: Paired two-tailed Student's t-test (exact, via the incomplete beta function), "
         "pairing CASCADE and Baseline by matching run_id/seed. "
-        "Welch's t-test retained for reference in welch_t_test(); Mann-Whitney U also computed.",
+        "Incomplete or duplicate pairs are errors; Mann-Whitney U is reported descriptively.",
         "- **RAF definition**: `sstable_block_reads / total_reads`.",
         "  One block = one 4KB `pread()` call to the OS (cache hits not counted).",
         "",
@@ -571,13 +566,11 @@ def main():
                 # Paired t-test aligned by run_id (same seed per run_id across configs).
                 base_by_rid_sw = {r['run_id']: r for r in base_rows_sw}
                 casc_by_rid_sw = {r['run_id']: r for r in casc_rows_sw}
-                paired_ids_sw  = sorted(base_by_rid_sw.keys() & casc_by_rid_sw.keys())
-                if paired_ids_sw:
-                    cv_p = [casc_by_rid_sw[rid]['throughput_ops_s'] / 1000 for rid in paired_ids_sw]
-                    bv_p = [base_by_rid_sw[rid]['throughput_ops_s'] / 1000 for rid in paired_ids_sw]
-                    p = paired_t_test(cv_p, bv_p)
-                else:
-                    p = welch_t_test(bv, cv)  # fallback for unpaired partial data
+                paired_ids_sw = require_complete_pairing(
+                    base_rows_sw, casc_rows_sw, f"{wl} at {sc_str}")
+                cv_p = [casc_by_rid_sw[rid]['throughput_ops_s'] / 1000 for rid in paired_ids_sw]
+                bv_p = [base_by_rid_sw[rid]['throughput_ops_s'] / 1000 for rid in paired_ids_sw]
+                p = paired_t_test(cv_p, bv_p)
                 sig = "**Yes**" if p < 0.05 else "No"
 
                 rdb_sc = [r for r in (rdb_rows or []) if r['scale'] == sc and r['workload'] == wl]
@@ -594,7 +587,7 @@ def main():
 
     # --- Paired-difference analysis (STEP 5) ---
     # Pairs CASCADE vs Baseline by run_id, computes mean(D) and 95% CI per
-    # (workload, scale, metric).  Preserves Welch t-test output above.
+    # (workload, scale, metric), using the same exact paired inference.
     out_lines.append(paired_analysis(all_rows))
 
     output_text = "\n".join(out_lines)

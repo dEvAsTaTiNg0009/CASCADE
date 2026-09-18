@@ -5,6 +5,7 @@
 #include <cassert>
 #include <numeric>
 #include <cstdio>  // fprintf
+#include <stdexcept>
 
 namespace cascade {
 
@@ -95,7 +96,7 @@ std::vector<uint8_t> BlockedBloomFilter::serialize() const {
 }
 
 BlockedBloomFilter BlockedBloomFilter::deserialize(const uint8_t* data, size_t size) {
-    if (size < 12) return BlockedBloomFilter(512, 8);
+    if (size < 12) return BlockedBloomFilter(512, optimalBloomK(14));
     uint32_t k_u = 0, n_u = 0, nb_u = 0;
     std::memcpy(&k_u, data, 4);
     std::memcpy(&n_u, data + 4, 4);
@@ -142,11 +143,7 @@ std::vector<int64_t> BloomAllocator::allocateWithBudget(
 
     // Edge-case: budget can't even cover the minimum floor for all levels.
     if ((int64_t)L * B_MIN > total_budget_bits) {
-        fprintf(stderr,
-            "[Bloom] WARNING: budget %lld bits < L=%d × b_min=%lld. "
-            "Cannot conserve global budget; each level gets b_min only.\n",
-            (long long)total_budget_bits, L, (long long)B_MIN);
-        return alloc; // sum = L * B_MIN, which may exceed the budget
+        throw std::invalid_argument("Bloom budget is smaller than one block per level");
     }
 
     // Allocate in whole blocks of 512 bits directly to ensure exact block alignment
@@ -231,7 +228,11 @@ void BloomAllocator::reallocateStructural(
     }
 
     int64_t max_total_bits = (int64_t)max_total_bytes * 8;
-    int64_t target_budget  = std::min((int64_t)total_count * bits_per_key, max_total_bits);
+    int64_t minimum_budget = (int64_t)L * 512;
+    if (max_total_bits < minimum_budget)
+        throw std::invalid_argument("Bloom cap is smaller than one block per level");
+    int64_t target_budget  = std::min(std::max((int64_t)total_count * bits_per_key,
+                                               minimum_budget), max_total_bits);
     target_budget = std::max(target_budget, (int64_t)L * 512);
 
     auto alloc = allocateWithBudget(counts, target_budget, bits_per_key);
@@ -334,7 +335,11 @@ void BloomAllocator::reallocateStructural(
     }
 
     int64_t max_total_bits = (int64_t)max_total_bytes * 8;
-    int64_t target_budget  = std::min((int64_t)total_count * bits_per_key, max_total_bits);
+    int64_t minimum_budget = (int64_t)L * 512;
+    if (max_total_bits < minimum_budget)
+        throw std::invalid_argument("Bloom cap is smaller than one block per level");
+    int64_t target_budget  = std::min(std::max((int64_t)total_count * bits_per_key,
+                                               minimum_budget), max_total_bits);
     target_budget = std::max(target_budget, (int64_t)L * 512);
 
     auto alloc = allocateWithBudget(counts, target_budget, bits_per_key);

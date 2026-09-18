@@ -96,16 +96,13 @@ private:
     void doFlush(std::vector<KVPair> sorted);
     void doCompaction();
     void rebuildBlooms();
-    void staticUniformBloomInit();  // one-shot static Bloom init for bloom_adaptive_enabled=false
+    void rebuildUniformBlooms();
     bool isLevelFull(int level) const;
     int  countPhysicalKeys() const;
     void backgroundLoop();
     void requestCompaction();
     void loadExistingSSTables();
 
-    // Set to true after the first staticUniformBloomInit() call so the static
-    // path is never re-entered for the lifetime of this LSMEngine instance.
-    bool blooms_initialized_ = false;
 };
 
 } // namespace cascade

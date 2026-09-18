@@ -48,7 +48,7 @@ SSTable::~SSTable() {
 
 // Deprecated in-memory constructor: writes out a real temp file so behavior is consistent
 SSTable::SSTable(uint64_t id_, std::vector<KVPair> sorted_data, int bloom_bits)
-    : id(id_), filter(bloom_bits, 8)
+    : id(id_), filter(bloom_bits, optimalBloomK(14))
 {
     std::atomic<int64_t> bytes_dummy{0};
     std::string path = "./data/sst_compat_" + std::to_string(id_) + ".sst";
@@ -253,7 +253,8 @@ std::shared_ptr<SSTable> SSTableBuilder::build(
     uint64_t id,
     const std::vector<KVPair>& sorted_run,
     int bloom_bits,
-    std::atomic<int64_t>& bytes_written_counter)
+    std::atomic<int64_t>& bytes_written_counter,
+    int bloom_k)
 {
     // Ensure parent directory exists
     std::string dir = filepath.substr(0, filepath.find_last_of('/'));
@@ -270,7 +271,7 @@ std::shared_ptr<SSTable> SSTableBuilder::build(
         return nullptr;
     }
 
-    BlockedBloomFilter filter(bloom_bits, 8);
+    BlockedBloomFilter filter(bloom_bits, bloom_k);
     for (const auto& kv : sorted_run) {
         filter.add(kv.key);
     }

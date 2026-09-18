@@ -18,6 +18,7 @@
 #include <atomic>
 #include <set>
 #include <mutex>
+#include <stdexcept>
 
 using namespace cascade;
 using namespace std::chrono;
@@ -420,12 +421,23 @@ void testBloomBudgetConservation() {
         // Large number of levels
         {"many_levels",           {500,1000,2000,4000,8000,16000,32000,64000,128000,256000,512000,1024000,0,0,0},
          256LL*1024*1024*8, 10},
-        // Budget below L * b_min (fallback path)
+        // Budget below L * b_min must be rejected rather than exceeded.
         {"below_floor_budget",    {100, 200, 300}, 512*2, 14},
     };
 
     for (auto& tc : cases) {
         int L = (int)tc.counts.size();
+        if (tc.name == "below_floor_budget") {
+            bool rejected = false;
+            try {
+                (void)BloomAllocator::allocateWithBudget(tc.counts, tc.budget_bits, tc.bpk);
+            } catch (const std::invalid_argument&) {
+                rejected = true;
+            }
+            CHECK(rejected, tc.name + ": impossible budget rejected");
+            continue;
+        }
+
         auto alloc = BloomAllocator::allocateWithBudget(tc.counts, tc.budget_bits, tc.bpk);
 
         CHECK((int)alloc.size() == L, tc.name + ": alloc size == L");
@@ -437,14 +449,10 @@ void testBloomBudgetConservation() {
         }
         CHECK(floor_ok, tc.name + ": every b_i >= 512 (b_min)");
 
-        // Budget below floor: only check floor, not total
-        if (tc.budget_bits < (int64_t)L * 512) continue;
-
-        // sum(b_i) <= budget_bits + L (rounding slack of 1 block per level)
+        // Whole-block allocation must conserve the configured budget.
         int64_t total = 0;
         for (auto b : alloc) total += b;
-        bool budget_ok = (total <= tc.budget_bits + (int64_t)L * 512);
-        CHECK(budget_ok, tc.name + ": sum(b_i) <= budget + L*block_slack");
+        CHECK(total <= tc.budget_bits, tc.name + ": sum(b_i) <= budget");
     }
 
     // Verify that rebuild(bits, k) actually updates k_
@@ -801,8 +809,8 @@ void testBloomKInvariant() {
     }
 
     // --- Scenario B: static uniform path (bloom_adaptive_enabled=false) ---
-    // After construction + flush, filters are sized once by staticUniformBloomInit().
-    // k must still equal optimalBloomK(bpk) — the static path must not hardcode k.
+    // After construction + flush, uniform filters are rebuilt from current SSTables.
+    // k must still equal optimalBloomK(bpk) — the uniform path must not hardcode k.
     {
         std::string dir = "./data_bloom_k_test_static";
         (void)system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
@@ -811,7 +819,7 @@ void testBloomKInvariant() {
         cfg.db_path             = dir;
         cfg.memtable_capacity   = 256;
         cfg.bloom_bits_per_key  = 14;
-        cfg.bloom_adaptive_enabled = false;  // static uniform path
+        cfg.bloom_adaptive_enabled = false;  // uniform allocation path
 
         {
             LSMEngine engine(cfg);
@@ -858,6 +866,52 @@ void testBloomKInvariant() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test 15: Uniform Bloom contents survive later flushes and compaction.
+// ---------------------------------------------------------------------------
+void testUniformBloomRebuild() {
+    std::cout << "\n== Test 15: Uniform Bloom Rebuild Across LSM Changes ==\n";
+    std::string dir = "./data_uniform_bloom_rebuild";
+    (void)system(("rm -rf " + dir + " && mkdir -p " + dir).c_str());
+
+    Config cfg;
+    cfg.db_path = dir;
+    cfg.memtable_capacity = 32;
+    cfg.max_levels = 4;
+    cfg.bloom_adaptive_enabled = false;
+
+    {
+        LSMEngine engine(cfg);
+        for (Key key = 1; key <= 64; ++key)
+            engine.insert(key, "batch_a_" + std::to_string(key));
+        engine.flush();
+
+        Value value;
+        bool batch_a_found = true;
+        for (Key key = 1; key <= 64; ++key)
+            batch_a_found = batch_a_found && engine.search(key, value);
+        CHECK(batch_a_found, "uniform Bloom finds batch A after first flush");
+
+        for (Key key = 1001; key <= 1064; ++key)
+            engine.insert(key, "batch_b_" + std::to_string(key));
+        engine.flush();
+
+        bool batch_b_found = true;
+        for (Key key = 1001; key <= 1064; ++key)
+            batch_b_found = batch_b_found && engine.search(key, value);
+        CHECK(batch_b_found, "uniform Bloom finds batch B after later flush");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        bool both_batches_found = true;
+        for (Key key : {Key(1), Key(32), Key(64), Key(1001), Key(1032), Key(1064)})
+            both_batches_found = both_batches_found && engine.search(key, value);
+        CHECK(both_batches_found, "uniform Bloom remains correct after compaction");
+        CHECK(engine.verifyBloomKInvariant(), "uniform rebuild preserves optimal Bloom k");
+    }
+
+    (void)system(("rm -rf " + dir).c_str());
+}
+
 
 int main() {
     std::cout << "\n";
@@ -881,6 +935,7 @@ int main() {
     testBloomHashCount();           // STEP 2B: k_ correctness after rebuild
     testGiniComplexity();           // STEP 3: Gini O(n log n) formula
     testBloomKInvariant();          // Part 2: numHashes() == optimalBloomK() after construction + rebuild
+    testUniformBloomRebuild();      // Uniform contents refresh after flush/compaction
 
     std::cout << "\n  +---------------------------------------------+\n";
     std::cout << "  |  Results: " << passed << " passed, " << failed << " failed\n";

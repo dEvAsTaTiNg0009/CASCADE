@@ -2,7 +2,7 @@
 // rocksdb_bench.cpp — RocksDB vs Baseline vs CASCADE comparison benchmark
 //
 // Runs RocksDB through the same workload harness as rigorous_bench.cpp.
-// All 11 workloads (A-F + W/RW/RSW/RS/R), same 6 scales, same repeat counts.
+// All 11 workloads (A-F + W/RW/RS/R), same 7 scales, same repeat counts.
 //
 // RocksDB config is matched to CASCADE baseline as closely as possible:
 // see include/rocksdb_adapter.h for all documented knobs.

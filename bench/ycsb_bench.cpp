@@ -317,6 +317,7 @@ int main(int argc, char** argv) {
     std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
 
     struct AblRow {
+        int id;
         MemtableType mt;
         bool ahlc_on;
         bool bloom_adpt;
@@ -353,14 +354,14 @@ int main(int argc, char** argv) {
     static constexpr int ABLATION_REPEATS = 5;
 
     std::vector<AblRow> ablation_configs = {
-        {MemtableType::SKIP_LIST, false, false, "Skip|Leveling|Unif  "},
-        {MemtableType::SKIP_LIST, false, true,  "Skip|Leveling|Adpt  "},
-        {MemtableType::SKIP_LIST, true,  false, "Skip|AHLC    |Unif  "},
-        {MemtableType::SKIP_LIST, true,  true,  "Skip|AHLC    |Adpt  "},
-        {MemtableType::CSB_PLUS,  false, false, "CSB+|Leveling|Unif  "},
-        {MemtableType::CSB_PLUS,  false, true,  "CSB+|Leveling|Adpt  "},
-        {MemtableType::CSB_PLUS,  true,  false, "CSB+|AHLC    |Unif  "},
-        {MemtableType::CSB_PLUS,  true,  true,  "CSB+|AHLC    |Adpt \u2190CASCADE"},
+        {0, MemtableType::SKIP_LIST, false, false, "Skip|Leveling|Unif  "},
+        {1, MemtableType::SKIP_LIST, false, true,  "Skip|Leveling|Adpt  "},
+        {2, MemtableType::SKIP_LIST, true,  false, "Skip|AHLC    |Unif  "},
+        {3, MemtableType::SKIP_LIST, true,  true,  "Skip|AHLC    |Adpt  "},
+        {4, MemtableType::CSB_PLUS,  false, false, "CSB+|Leveling|Unif  "},
+        {5, MemtableType::CSB_PLUS,  false, true,  "CSB+|Leveling|Adpt  "},
+        {6, MemtableType::CSB_PLUS,  true,  false, "CSB+|AHLC    |Unif  "},
+        {7, MemtableType::CSB_PLUS,  true,  true,  "CSB+|AHLC    |Adpt \u2190CASCADE"},
     };
 
     std::vector<AblationEntry> entries_200K, entries_1M;
@@ -370,7 +371,7 @@ int main(int argc, char** argv) {
     std::ofstream csv_200K("bench/results/ablation_200K_allruns.csv");
     std::ofstream csv_1M("bench/results/ablation_1M_allruns.csv");
     auto write_csv_header = [](std::ofstream& f) {
-        f << "config,repeat,tput_kops,waf,raf,saf,bloom_fpr_pct,ahlc_switches\n";
+        f << "scale,config_id,config,memtable,compaction,bloom,repeat,run_id,seed,tput_kops,waf,raf,saf,bloom_fpr_pct,ahlc_switches\n";
     };
     if (csv_200K.is_open()) write_csv_header(csv_200K);
     if (csv_1M.is_open())   write_csv_header(csv_1M);
@@ -388,7 +389,7 @@ int main(int argc, char** argv) {
                 cfg.ahlc_skew_threshold  = 1.1;
             }
             // bloom_adaptive_enabled gates the real Uniform/Adaptive Bloom path:
-            //   false → staticUniformBloomInit() called once, never re-triggered
+            //   false → uniform allocation policy, contents rebuilt on changes
             //   true  → dual-trigger adaptive realloc (structural + frequency)
             cfg.bloom_adaptive_enabled = row.bloom_adpt;
 
@@ -408,7 +409,12 @@ int main(int argc, char** argv) {
 
             if (csv_200K.is_open()) {
                 csv_200K << std::fixed << std::setprecision(4)
-                         << row.label << "," << rep+1 << "," << tput_k << ","
+                         << N4 << "," << row.id << "," << row.label << ","
+                         << (row.mt == MemtableType::SKIP_LIST ? "SkipList" : "CSB+") << ","
+                         << (row.ahlc_on ? "AHLC" : "Leveling") << ","
+                         << (row.bloom_adpt ? "Adaptive" : "Uniform") << ","
+                         << rep+1 << "," << (row.id * 100 + rep + 1) << "," << (42 + rep) << ","
+                         << tput_k << ","
                          << r.waf << "," << r.raf << "," << r.saf << ","
                          << fpr_pct << "," << r.ahlc_switches << "\n";
             }
@@ -436,7 +442,7 @@ int main(int argc, char** argv) {
     std::cout << "  +-----------------------+----------+-------+-------+-------+---------+--------+\n";
     std::cout << "  Note: Skip rows use cfg.memtable_type=SKIP_LIST. CSB+ rows use ConcurrentCSBTree.\n";
     std::cout << "  AHLC=off forces fixed Leveling. Adaptive Bloom uses dual-trigger reallocation;\n";
-    std::cout << "  Uniform uses staticUniformBloomInit() (one-shot, never re-triggered).\n";
+    std::cout << "  Uniform uses a fixed allocation policy with rebuilt current contents.\n";
     std::cout << "  Each row = " << ABLATION_REPEATS << " repeats (seed=42..46); values are mean\u00b1std.\n";
     std::cout << "  Raw per-run data saved to bench/results/ablation_200K_allruns.csv\n";
 
@@ -484,7 +490,12 @@ int main(int argc, char** argv) {
 
             if (csv_1M.is_open()) {
                 csv_1M << std::fixed << std::setprecision(4)
-                       << row.label << "," << rep+1 << "," << tput_k << ","
+                       << N4b << "," << row.id << "," << row.label << ","
+                       << (row.mt == MemtableType::SKIP_LIST ? "SkipList" : "CSB+") << ","
+                       << (row.ahlc_on ? "AHLC" : "Leveling") << ","
+                       << (row.bloom_adpt ? "Adaptive" : "Uniform") << ","
+                       << rep+1 << "," << (row.id * 100 + rep + 1) << "," << (42 + rep) << ","
+                       << tput_k << ","
                        << r.waf << "," << r.raf << "," << r.saf << ","
                        << fpr_pct << "," << r.ahlc_switches << "\n";
             }
@@ -521,8 +532,8 @@ int main(int argc, char** argv) {
                "on Workload A (50% Read / 50% Update).\n";
         out << "> Each row = " << ABLATION_REPEATS << " repeats (seed=42.." << 41+ABLATION_REPEATS
             << "); values are **mean +/- std**.\n";
-        out << "> \"Uniform\" uses staticUniformBloomInit(): filters sized once at startup, never "
-               "re-triggered by AHLC or access frequency.\n";
+         out << "> \"Uniform\" uses a fixed allocation policy; filter contents are rebuilt "
+             "when SSTables change.\n";
         out << "> \"Adaptive\" uses dual-trigger reallocation (structural + frequency).\n";
         out << "> Raw per-run data: bench/results/ablation_200K_allruns.csv and "
                "bench/results/ablation_1M_allruns.csv\n\n";

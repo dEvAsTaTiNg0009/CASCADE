@@ -1,9 +1,7 @@
 # CASCADE: Cache-Sensitive Adaptive Storage Architecture for Dynamic and Efficient LSM-Tree Design
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
-[![Tests](https://img.shields.io/badge/Tests-307%20passed%2C%200%20failed-brightgreen.svg)]()
-[![ASan](https://img.shields.io/badge/ASan-Clean-brightgreen.svg)]()
-[![TSan](https://img.shields.io/badge/TSan-Clean-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-314%20passed%2C%200%20failed-brightgreen.svg)]()
 
 **CASCADE** is a research-grade LSM-based key-value storage engine in modern C++17 featuring real file-backed SSTables, a persistent append-only Write-Ahead Log (WAL) with group commit, and three co-designed subsystems:
 1. **Concurrent Cache-Sensitive $B^+$-Tree ($\text{CSB}^+$ Tree) MemTable** with CPU cache-line aligned nodes (`alignas(64)`) and Epoch-Based Memory Reclamation (`EBMM`).
@@ -11,6 +9,14 @@
 3. **Dual-Trigger Blocked Bloom Filter Layer** combining compaction-driven structural budget reallocation with access-frequency tracking.
 
 > **Scope & Realistic Positioning**: CASCADE is a research prototype designed to evaluate these architectural ideas against an identical from-scratch baseline under controlled conditions. It is **not** a production drop-in replacement for mature systems like RocksDB (which includes a decade of production hardening, parallel multi-threaded compaction, block compression, and extensive tooling).
+
+### Verified implementation status
+
+- `make clean && make test`: **314 assertions passed, 0 failed**.
+- Uniform Bloom mode uses a fixed allocation policy but rebuilds contents after flushes and compactions; it does not freeze filters.
+- Runtime Bloom hash counts are derived from `optimalBloomK()`; the default 14 bits/key configuration uses `k=10`.
+- CASCADE-vs-Baseline significance tests use complete matched pairs by `run_id`/seed and exact two-tailed Student's t inference. Incomplete or duplicate pairs fail loudly.
+- The final 200K and 1M ablation raw runs are preserved in `bench/results/ablation_200K_allruns.csv` and `bench/results/ablation_1M_allruns.csv` after the benchmark completes. These files contain 8 configurations × 5 repeats with scale, configuration, run ID, and seed metadata.
 
 ---
 
@@ -56,10 +62,10 @@
 
 ### Build & Run
 ```bash
-# 1. Clean build + test suite (307 passed, 0 failed — ASan/TSan verified)
+# 1. Clean build + test suite (314 passed, 0 failed)
 make clean && make test
 
-# 2. Full 6-scale sweep (11 workloads × 3/5 repeats × 2 systems)
+# 2. Full 7-scale sweep (11 workloads × 3/5 repeats × 2 systems)
 #    3 repeats at 10M and 15M — see methodology note in CASCADE_RESEARCH.md Section 9
 make rigorous && ./rigorous_bench --all
 
@@ -91,12 +97,12 @@ python3 scripts/aggregate_results.py
 
 ## 📊 Real File-Backed Benchmark Results
 
-All measurements come from reproducible runs writing real binary SSTables and WAL files to disk with isolated state per run (`fsync` group commits per 64 writes, 4KB SSTable data blocks, 64MB LRU BlockCache). Every run is executed independently 3–5 times with fresh directories. All comparisons report **Mean ± Sample Std Dev**, two-tailed **Welch's t-test $p$-values**, and direct comparisons against **RocksDB 11.8.1**.
+All measurements come from reproducible runs writing real binary SSTables and WAL files to disk with isolated state per run (`fsync` group commits per 64 writes, 4KB SSTable data blocks, 64MB LRU BlockCache). Every run is executed independently 3–5 times with fresh directories. CASCADE-vs-Baseline comparisons report **Mean ± Sample Std Dev** and exact two-tailed **paired Student's t-test $p$-values** based on matching run IDs and seeds. RocksDB comparisons are reported separately when raw RocksDB runs are available.
 
 ### 1. Scale Comparison: 15,000,000 Operations (3 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 15000000 --repeats 3 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 16.0 ± 0.1 | **17.1 ± 0.0** | 208.1 ± 0.6 | **+7.1%** | -91.8% | 154.31 ± 0.00 | **120.58 ± 0.00** | **-21.9%** | $p = 0.0001$ |
 | **YCSB-B** | 95% Read / 5% Update | 148.5 ± 0.7 | **217.3 ± 1.1** | 472.2 ± 1.8 | **+46.3%** | -54.0% | 134.51 ± 0.01 | **61.47 ± 0.01** | **-54.3%** | $p = 0.0001$ |
@@ -115,7 +121,7 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 ### 2. Scale Comparison: 10,000,000 Operations (3 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 10000000 --repeats 3 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 23.1 ± 0.6 | **31.8 ± 4.2** | 183.1 ± 39.3 | **+37.8%** | -82.6% | 167.18 ± 0.01 | **78.13 ± 1.37** | **-53.3%** | $p = 0.0004$ |
 | **YCSB-B** | 95% Read / 5% Update | 232.9 ± 19.3 | **270.9 ± 25.2** | 518.7 ± 10.1 | **+16.3%** | -47.8% | 107.60 ± 0.01 | **71.73 ± 0.01** | **-33.3%** | $p = 0.0382$ |
@@ -134,7 +140,7 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 ### 3. Scale Comparison: 5,000,000 Operations (3 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 5000000 --repeats 3 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 56.9 ± 1.0 | **73.2 ± 0.9** | 215.9 ± 20.3 | **+28.4%** | -66.1% | 84.48 | **43.42** | **-48.6%** | $p < 0.001$ |
 | **YCSB-B** | 95% Read / 5% Update | 547.1 ± 15.7 | 513.1 ± 0.8 | **566.5 ± 5.8** | -6.2% | -9.4% | 54.51 | **32.94** | **-39.6%** | $p < 0.001$ |
@@ -153,7 +159,7 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 ### 4. Scale Comparison: 3,000,000 Operations (3 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 3000000 --repeats 3 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 127.1 ± 6.7 | **153.7 ± 5.0** | 262.7 ± 1.4 | **+21.0%** | -41.5% | 39.61 | **27.29** | **-31.1%** | $p < 0.001$ |
 | **YCSB-B** | 95% Read / 5% Update | 595.1 ± 7.7 | **702.1 ± 5.0** | 632.4 ± 9.4 | **+18.0%** | **+11.0%** | 39.13 | **29.08** | **-25.7%** | $p < 0.001$ |
@@ -172,7 +178,7 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 ### 5. Scale Comparison: 1,000,000 Operations (5 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 1000000 --repeats 5 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 417.3 ± 2.7 | 382.2 ± 0.6 | 237.5 ± 24.7 | -8.4% | **+60.9%** | 11.05 | 12.43 | +12.4% | $p < 0.001$ |
 | **YCSB-B** | 95% Read / 5% Update | 1063.2 ± 15.4 | **1300.9 ± 30.7** | 676.8 ± 32.1 | **+22.4%** | **+92.2%** | 16.84 | **12.22** | **-27.5%** | $p < 0.001$ |
@@ -191,7 +197,7 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 ### 6. Scale Comparison: 500,000 Operations (5 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 500000 --repeats 5 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 615.7 ± 12.2 | 569.4 ± 3.7 | 269.1 ± 6.9 | -7.5% | **+111.6%** | 6.46 ± 0.02 | 7.94 ± 0.01 | +22.9% | $p = 0.0001$ |
 | **YCSB-B** | 95% Read / 5% Update | 1340.3 ± 22.8 | **1570.8 ± 42.1** | 723.4 ± 18.9 | **+17.2%** | **+117.1%** | 9.29 ± 0.00 | **8.32 ± 0.00** | **-10.5%** | $p = 0.0001$ |
@@ -210,7 +216,7 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 ### 7. Scale Comparison: 100,000 Operations (5 Repeats, Mean ± Std, vs RocksDB)
 *Command: `./rigorous_bench --scale 100000 --repeats 5 --single`*
 
-| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Welch $p$ |
+| Workload | Access Mix | Baseline (Kops/s) | CASCADE (Kops/s) | RocksDB (Kops/s) | Diff vs Baseline | Diff vs RocksDB | Baseline WAF | CASCADE WAF | WAF Reduct. | Paired $p$ |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **YCSB-A** | 50% Read / 50% Update | 999.4 ± 142.8 | **1031.8 ± 86.5** | 250.4 ± 29.4 | **+3.2%** | **+312.0%** | 3.00 ± 0.00 | 3.05 ± 0.00 | +1.7% | $p = 0.6649$ |
 | **YCSB-B** | 95% Read / 5% Update | 2515.2 ± 63.0 | **3119.5 ± 49.4** | 1099.4 ± 23.9 | **+24.0%** | **+183.7%** | 3.75 ± 0.00 | **3.57 ± 0.00** | **-4.7%** | $p = 0.0001$ |
@@ -264,7 +270,7 @@ To isolate the individual contribution of each subsystem, we evaluated all 8 com
 | SkipList | Fixed Leveling | Adaptive (Dual-Trigger) | 76.5 ± 3.5 | 24.11 ± 7.17 | 2.20 ± 0.05 | 4.80 ± 0.43 | 46.8008% ± 3.7158% | 0.0 |
 | SkipList | AHLC | Uniform (Static) | 506.5 ± 35.8 | 21.79 ± 3.98 | 0.69 ± 0.02 | 6.31 ± 0.54 | 1.0637% ± 0.3829% | 48.0 |
 | SkipList | AHLC | Adaptive (Dual-Trigger) | 17.0 ± 19.0 | 25.24 ± 1.00 | 2.46 ± 0.02 | 7.03 ± 0.40 | 36.4936% ± 1.8295% | 49.0 |
-| CSB+ Tree | Fixed Leveling | Uniform (Static) | **604.9 ± 153.4** | 29.19 ± 12.45 | 0.65 ± 0.01 | 5.37 ± 0.58 | 2.3530% ± 0.4307% | 0.0 |
+| CSB+ Tree | Fixed Leveling | Uniform (Fixed Allocation) | **604.9 ± 153.4** | 29.19 ± 12.45 | 0.65 ± 0.01 | 5.37 ± 0.58 | 2.3530% ± 0.4307% | 0.0 |
 | CSB+ Tree | Fixed Leveling | Adaptive (Dual-Trigger) | 45.0 ± 30.0 | 26.00 ± 7.14 | 2.15 ± 0.03 | 5.50 ± 0.30 | 44.4645% ± 1.3289% | 0.0 |
 | CSB+ Tree | AHLC | Uniform (Static) | 554.7 ± 77.8 | **20.36 ± 4.13** | 0.68 ± 0.03 | 6.98 ± 0.48 | **0.9499% ± 0.7913%** | 48.0 |
 | CSB+ Tree | AHLC | Adaptive (Dual-Trigger) *(CASCADE)* | 51.0 ± 3.3 | 25.42 ± 1.24 | 2.48 ± 0.03 | 7.39 ± 0.52 | 36.6445% ± 2.0168% | 49.0 |
@@ -410,4 +416,4 @@ The codebase includes targeted pre-submission corrections ensuring strict mathem
 7. **Experiment Reproducibility Metadata (`include/metadata.h`)**:
    - Added `printExperimentMetadata()` to emit git commit, compiler version, OS, hardware, and full configuration under `# META:` tags for automated log parsing.
 8. **Extended Verification Suite (`tests/test_all.cpp`)**:
-   - 13 test suites with **307 assertions** covering budget conservation, AHLC diagnostics, Workload F distribution, WAF accounting, Bloom hash counts, and Gini complexity. Verified 100% clean under AddressSanitizer and ThreadSanitizer.
+   - 15 test groups with **314 assertions** covering budget conservation, AHLC diagnostics, Workload F distribution, WAF accounting, Bloom hash counts, Gini complexity, and uniform Bloom rebuilding. The standard test suite was run cleanly; sanitizer status must be refreshed separately after final code changes.

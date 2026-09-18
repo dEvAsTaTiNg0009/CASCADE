@@ -17,7 +17,7 @@
 //   - Outlier detection: any repeat whose throughput is >2σ from the other
 //     repeats is flagged with [OUTLIER] in stdout and in the CSV. It is NOT
 //     dropped — it remains in the mean/std calculation (honest reporting).
-//   - Welch's t-test p-values are reported at every scale for every workload.
+//   - Paired two-tailed Student's t-test p-values are reported at every scale.
 //   - Mann-Whitney U uses a normal approximation for n>=4 (exact tables only
 //     available for small n).
 // =============================================================================
@@ -68,19 +68,63 @@ StatSummary calcStats(const std::vector<double>& vals) {
     return {m, s};
 }
 
-// Welch's t-test p-value approximation (two-tailed, normal approximation)
-double welchTTest(const std::vector<double>& a, const std::vector<double>& b) {
-    if (a.size() < 2 || b.size() < 2) return 1.0;
-    auto s1 = calcStats(a);
-    auto s2 = calcStats(b);
-    double n1 = a.size(), n2 = b.size();
-    double v1 = (s1.stddev * s1.stddev) / n1;
-    double v2 = (s2.stddev * s2.stddev) / n2;
-    if (v1 + v2 < 1e-12) return (std::abs(s1.mean - s2.mean) < 1e-6) ? 1.0 : 0.001;
-    double t = std::abs(s1.mean - s2.mean) / std::sqrt(v1 + v2);
-    // Two-tailed p-value via normal approximation
-    double p = 2.0 * (1.0 - 0.5 * (1.0 + std::erf(t / std::sqrt(2.0))));
-    return std::max(0.0001, std::min(1.0, p));
+double betaContinuedFraction(double a, double b, double x) {
+    constexpr int max_iter = 200;
+    constexpr double eps = 3e-14;
+    constexpr double fpmin = 1e-300;
+    double qab = a + b, qap = a + 1.0, qam = a - 1.0;
+    double c = 1.0;
+    double d = 1.0 - qab * x / qap;
+    d = std::abs(d) < fpmin ? fpmin : d;
+    d = 1.0 / d;
+    double h = d;
+    for (int m = 1; m <= max_iter; ++m) {
+        int m2 = 2 * m;
+        double aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d;
+        d = std::abs(d) < fpmin ? fpmin : d;
+        c = 1.0 + aa / c;
+        c = std::abs(c) < fpmin ? fpmin : c;
+        d = 1.0 / d;
+        h *= d * c;
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d;
+        d = std::abs(d) < fpmin ? fpmin : d;
+        c = 1.0 + aa / c;
+        c = std::abs(c) < fpmin ? fpmin : c;
+        d = 1.0 / d;
+        double delta = d * c;
+        h *= delta;
+        if (std::abs(delta - 1.0) < eps) break;
+    }
+    return h;
+}
+
+double regularizedBeta(double a, double b, double x) {
+    if (x <= 0.0) return 0.0;
+    if (x >= 1.0) return 1.0;
+    double log_beta = std::lgamma(a + b) - std::lgamma(a) - std::lgamma(b)
+                    + a * std::log(x) + b * std::log(1.0 - x);
+    double bt = std::exp(log_beta);
+    if (x < (a + 1.0) / (a + b + 2.0))
+        return bt * betaContinuedFraction(a, b, x) / a;
+    return 1.0 - bt * betaContinuedFraction(b, a, 1.0 - x) / b;
+}
+
+double pairedTTest(const std::vector<double>& cascade,
+                   const std::vector<double>& baseline) {
+    if (cascade.size() != baseline.size() || cascade.size() < 2) return 1.0;
+    std::vector<double> differences;
+    differences.reserve(cascade.size());
+    for (size_t i = 0; i < cascade.size(); ++i)
+        differences.push_back(cascade[i] - baseline[i]);
+    auto stats = calcStats(differences);
+    if (stats.stddev < 1e-12)
+        return std::abs(stats.mean) < 1e-9 ? 1.0 : 0.0001;
+    double t = stats.mean / (stats.stddev / std::sqrt((double)differences.size()));
+    int df = (int)differences.size() - 1;
+    double x = df / (df + t * t);
+    return std::max(0.0001, std::min(1.0, regularizedBeta(df / 2.0, 0.5, x)));
 }
 
 // Mann-Whitney U with normal approximation (handles any n >= 2)
@@ -384,14 +428,14 @@ void runScaleBenchmark(int scale, int repeats, bool direct_io_flag = false) {
     std::stringstream ss;
 
     ss << "### YCSB Benchmark Summary — Scale " << scale_str << " (" << scale << " ops";
-    if (repeats >= 2) ss << ", " << repeats << " repeats, mean ± std, Welch t-test p-value)";
+    if (repeats >= 2) ss << ", " << repeats << " repeats, mean ± std, paired t-test p-value)";
     else ss << ", single run)";
     ss << "\n\n";
 
     if (direct_io_flag) ss << "> **direct-io=true**: page cache bypassed (macOS F_NOCACHE / Linux O_DIRECT)\n\n";
 
     if (repeats >= 2) {
-        ss << "| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Welch t p | Sig (p<0.05) |\n";
+        ss << "| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | paired t p | Sig (p<0.05) |\n";
         ss << "|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|\n";
 
         for (auto& fn : wl_funcs) {
@@ -423,7 +467,7 @@ void runScaleBenchmark(int scale, int repeats, bool direct_io_flag = false) {
             double diff_t = st_bt.mean > 0 ? (st_ct.mean - st_bt.mean) / st_bt.mean * 100.0 : 0;
             double u_stat = 0;
             (void)mannWhitneyU(base_tput, casc_tput, u_stat);
-            double p_wt = welchTTest(base_tput, casc_tput);
+            double p_wt = pairedTTest(casc_tput, base_tput);
 
             ss << "| " << wl_label << " | Throughput (Kops/s) | "
                << std::fixed << std::setprecision(1) << st_bt.mean << " ± " << st_bt.stddev << " | "
@@ -634,7 +678,7 @@ int main(int argc, char** argv) {
     std::cout << "  +====================================================================+\n";
     std::cout << "  |  CASCADE Research Engine — Rigorous Multi-Scale Benchmark Suite     |\n";
     std::cout << "  |  11 Workloads (YCSB A-F + W/RW/RSW/RS/R) × 6 Scales × 5 Repeats  |\n";
-    std::cout << "  |  Welch t-test p-values at every scale. Outliers flagged, not dropped|\n";
+    std::cout << "  |  Paired Student t-test p-values at every scale. Outliers kept       |\n";
     std::cout << "  +====================================================================+\n";
 
     // -----------------------------------------------------------------------

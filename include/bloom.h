@@ -20,7 +20,7 @@ public:
     static constexpr int BLOCK_BYTES = 64;
     static constexpr int BLOCK_BITS  = BLOCK_BYTES * 8; // 512
 
-    explicit BlockedBloomFilter(int total_bits = 8192, int k = 8);
+    explicit BlockedBloomFilter(int total_bits = 8192, int k = optimalBloomK(14));
 
     void add(Key key);
     bool possiblyContains(Key key) const;

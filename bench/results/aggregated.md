@@ -7,10 +7,10 @@
 ## Methodology Notes
 
 - **11 workloads**: Standard YCSB A–F + paper-defined W, RW, RSW, RS, R
-- **6 scales**: 100K / 500K / 1M / 5M / 10M / 15M
+- **7 scales**: 100K / 500K / 1M / 3M / 5M / 10M / 15M
 - **Repeats**: 5 at 100K–5M; 3 at 10M and 15M (wall-clock budget reduction — stated explicitly)
 - **Seed**: `generateOps(seed = 42 + run_id)` — same seed per run_id across all 11 workloads
-- **Statistics**: Paired two-tailed Student's t-test (exact, via the incomplete beta function), pairing CASCADE and Baseline by matching run_id/seed. Welch's t-test retained for reference in welch_t_test(); Mann-Whitney U also computed.
+- **Statistics**: Paired two-tailed Student's t-test (exact, via the incomplete beta function), pairing CASCADE and Baseline by matching run_id/seed. Incomplete or duplicate pairs are errors; Mann-Whitney U is reported descriptively.
 - **RAF definition**: `sstable_block_reads / total_reads`.
   One block = one 4KB `pread()` call to the OS (cache hits not counted).
 

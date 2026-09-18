@@ -333,7 +333,9 @@ void LSMEngine::doFlush(std::vector<KVPair> sorted) {
     uint64_t id = SSTable::next_id_++;
     std::string sst_path = cfg_.db_path + "/L0_" + std::to_string(id) + ".sst";
     int bloom_bits = std::max(512, (int)(cfg_.bloom_bits_per_key * sorted.size()));
-    auto sst = SSTableBuilder::build(sst_path, id, sorted, bloom_bits, metrics_.bytes_written_flush);
+    auto sst = SSTableBuilder::build(sst_path, id, sorted, bloom_bits,
+                                     metrics_.bytes_written_flush,
+                                     optimalBloomK(cfg_.bloom_bits_per_key));
 
     int bytes_flushed = sst ? (int)sst->file_size : ((int)sorted.size() * cfg_.bytes_per_kv);
 
@@ -342,20 +344,9 @@ void LSMEngine::doFlush(std::vector<KVPair> sorted) {
         if (sst) {
             levels_[0].push_back(sst);
         }
-        if (!bloom_filters_.empty()) {
-            int l0_count = 0;
-            for (auto& s : levels_[0]) if (s) l0_count += s->numEntries();
-            int l0_bits = std::max(512, (int)(cfg_.bloom_bits_per_key * l0_count * 1.0));
-            l0_bits = std::min(l0_bits, 32 * 1024 * 1024 * 8);
-            bloom_filters_[0].rebuild(l0_bits);
-            for (auto& s : levels_[0]) {
-                if (!s) continue;
-                auto pairs = s->readAll();
-                for (auto& kv : pairs)
-                    bloom_filters_[0].add(kv.key);
-            }
-        }
     }
+
+    rebuildBlooms();
 
     int64_t total_sst = metrics_.bytes_written_flush.load(std::memory_order_relaxed) +
                         metrics_.bytes_written_compaction.load(std::memory_order_relaxed);
@@ -419,18 +410,12 @@ void LSMEngine::doCompaction() {
 }
 
 // ---------------------------------------------------------------------------
-// BLOOM REBUILD — dual-trigger (adaptive) or one-shot static (uniform)
+// BLOOM REBUILD — uniform contents are rebuilt on every structure change;
+// adaptive mode additionally changes allocation according to its triggers.
 // ---------------------------------------------------------------------------
 void LSMEngine::rebuildBlooms() {
-    // Static uniform path: size filters once from bloom_bits_per_key, never
-    // re-triggered by AHLC switches or access-frequency drift.  This is the
-    // "Uniform" dimension in the ablation study.  blooms_initialized_ ensures
-    // the sizing only runs once per LSMEngine lifetime.
     if (!cfg_.bloom_adaptive_enabled) {
-        if (!blooms_initialized_) {
-            staticUniformBloomInit();
-            blooms_initialized_ = true;
-        }
+        rebuildUniformBlooms();
         return;
     }
 
@@ -439,7 +424,7 @@ void LSMEngine::rebuildBlooms() {
     while ((int)access_trackers_.size() < (int)levels_.size())
         access_trackers_.emplace_back();
     while ((int)bloom_filters_.size() < (int)levels_.size())
-        bloom_filters_.emplace_back(512, 8);
+        bloom_filters_.emplace_back(512, optimalBloomK(cfg_.bloom_bits_per_key));
 
     BloomAllocator::reallocateStructural(bloom_filters_, levels_,
                                          cfg_.bloom_bits_per_key,
@@ -465,17 +450,16 @@ void LSMEngine::rebuildBlooms() {
 }
 
 // ---------------------------------------------------------------------------
-// STATIC UNIFORM BLOOM INIT — one-shot sizing for bloom_adaptive_enabled=false
+// UNIFORM BLOOM REBUILD — fixed allocation policy, current contents
 //
 // Sizes every level's filter exactly once using:
 //   bits = max(512, bloom_bits_per_key * |L_i|)  capped at bloom_max_bytes
 //   k    = optimalBloomK(bloom_bits_per_key)
 //
-// This is intentionally NOT triggered again by AHLC switches or access drift,
-// matching the "Uniform" ablation dimension semantics: the filter is sized from
-// the current level population at construction time and then frozen.
+// The policy is uniform and does not use AHLC/access frequency, but contents
+// are always rebuilt so newly created and compacted SSTables are represented.
 // ---------------------------------------------------------------------------
-void LSMEngine::staticUniformBloomInit() {
+void LSMEngine::rebuildUniformBlooms() {
     int L = (int)levels_.size();
     while ((int)bloom_filters_.size() < L)
         bloom_filters_.emplace_back(512, optimalBloomK(cfg_.bloom_bits_per_key));
@@ -538,7 +522,7 @@ void LSMEngine::printMetrics(const std::string& label, double elapsed_sec) {
 // the configured bits_per_key.  This is always true by construction:
 //   - Construction: bloom_filters_.emplace_back(512, optimalBloomK(...))
 //   - reallocateStructural(): calls rebuild(bits, k_opt) with k_opt = optimalBloomK()
-//   - staticUniformBloomInit(): calls rebuild(bits, k_opt) with k_opt = optimalBloomK()
+//   - rebuildUniformBlooms(): calls rebuild(bits, k_opt) with k_opt = optimalBloomK()
 // This method exists so a future refactor cannot silently break this invariant
 // while "cleaning up" what might look like redundant k computations.
 // ---------------------------------------------------------------------------

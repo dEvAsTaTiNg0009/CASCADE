@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 gen_workload_configs.py — Generate plain-text workload config files for all
-11 workloads × 6 scales. Outputs to bench/configs/.
+11 workloads × 7 scales. Outputs to bench/configs/.
 
 Each file documents the exact parameters used in the benchmark so a reviewer
 can verify the workload setup without reading C++ source.

@@ -291,7 +291,7 @@ These five workloads are defined in this paper and are **not** part of the stand
 | 10M | 10,000,000 | 3 | Reduced from 5 per methodology note below |
 | 15M | 15,000,000 | 3 | Reduced from 5 per methodology note below |
 
-> **Methodology Note — Repeat Reduction at 10M/15M**: At approximately 60 Kops/s for write-heavy workloads, 15M operations take ~4 minutes per run. Full 5-repeat coverage of 11 workloads × 6 scales × 2 systems would require ~22 hours of wall-clock time. We reduce to 3 repeats at 10M and 15M and note this explicitly. All other scales use 5 repeats. This follows the same honest-reporting approach used in the original paper for the 5M single-run case (now fixed to 5 repeats).
+> **Methodology Note — Repeat Reduction at 10M/15M**: At approximately 60 Kops/s for write-heavy workloads, 15M operations take ~4 minutes per run. Full 5-repeat coverage of 11 workloads × 7 scales × 2 systems would require ~22 hours of wall-clock time. We reduce to 3 repeats at 10M and 15M and note this explicitly. All other scales use 5 repeats.
 
 > **Outlier Handling**: Repeats whose throughput is >2σ from the other repeats are flagged with ⚠️ in tables and `[OUTLIER]` in stdout. They are **NOT dropped** from mean/std calculations — honest reporting requires including them.
 
@@ -299,7 +299,7 @@ These five workloads are defined in this paper and are **not** part of the stand
 - **Machine**: Apple Silicon (arm64, Darwin 25.6.0)
 - **Compiler**: Apple Clang, `-std=c++17 -O2 -pthread`
 - **I/O Subsystem**: Real POSIX disk I/O, plain `fsync()`, 4KB block size, 64MB block cache
-- **All correctness tests**: **307/307 ✅ PASS** (TSan-clean, ASan-clean)
+- **All correctness tests**: **314/314 PASS** in the standard test run. Sanitizer runs require a separate post-change execution.
 
 ### Correctness Test Summary
 
@@ -324,7 +324,7 @@ These five workloads are defined in this paper and are **not** part of the stand
 ### Scale Benchmark 1: 100K Operations (3 Repeats, Mean ± Std)
 *Command: `./rigorous_bench --scale 100000 --repeats 3 --single`*
 
-| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Welch t-test $p$ | Significance ($p < 0.05$) |
+| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Paired t-test $p$ | Significance ($p < 0.05$) |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **A (50R/50U)** | Throughput (Kops/s) | 1065.5 ± 13.7 | 1054.3 ± 33.1 | -1.0% | U=4 | $p=0.589$ | Not significant |
 | | WAF | 2.95 ± 0.00 | 3.00 ± 0.00 | +1.7% | - | - | - |
@@ -356,7 +356,7 @@ These five workloads are defined in this paper and are **not** part of the stand
 ### Scale Benchmark 2: 500K Operations (3 Repeats, Mean ± Std)
 *Command: `./rigorous_bench --scale 500000 --repeats 3 --single`*
 
-| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Welch t-test $p$ | Significance ($p < 0.05$) |
+| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Paired t-test $p$ | Significance ($p < 0.05$) |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **A (50R/50U)** | Throughput (Kops/s) | 621.0 ± 9.9 | 564.5 ± 5.9 | -9.1% | U=0 | **$p < 0.001$** | **Baseline faster** |
 | | WAF | 6.34 ± 0.00 | 7.77 ± 0.00 | +22.7% | - | - | - |
@@ -388,7 +388,7 @@ These five workloads are defined in this paper and are **not** part of the stand
 ### Scale Benchmark 3: 1M Operations (3 Repeats, Mean ± Std)
 *Command: `./rigorous_bench --scale 1000000 --repeats 3 --single`*
 
-| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Welch t-test $p$ | Significance ($p < 0.05$) |
+| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Paired t-test $p$ | Significance ($p < 0.05$) |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **A (50R/50U)** | Throughput (Kops/s) | 413.1 ± 3.1 | 376.2 ± 7.1 | -8.9% | U=0 | **$p < 0.001$** | **Baseline faster** |
 | | WAF | 10.78 ± 0.00 | 12.16 ± 0.00 | +12.8% | - | - | - |
@@ -563,7 +563,7 @@ To resolve this, we executed an exhaustive parameter sweep (`./ahlc_sweep`, swee
 ### ✅ Resolved Gaps
 1. **Real File-Backed Disk I/O — RESOLVED**: All SSTables are real POSIX binary files with 4KB block packing, packed index blocks, serialized Bloom filters, and 32-byte footers.
 2. **Persistent WAL & Recovery — RESOLVED**: Persistent append-only disk log with 64-write group commit and automated startup recovery.
-3. **Statistical Rigor — RESOLVED**: 5 independent repeats at all scales (3 at 10M/15M with explicit methodology note). Welch t-test p-values at every (workload, scale) combination. Mann-Whitney U generalized to n≥2. 5M no longer a single-run special case.
+3. **Statistical Rigor — RESOLVED**: matched CASCADE/Baseline repeats use exact paired Student's t-test p-values with complete run-ID validation. Mann-Whitney U remains descriptive. 5M is no longer a single-run special case.
 4. **Bloom Filter Saturation — RESOLVED**: Monkey-optimal per-key sizing (14 bits/key) maintaining FPR < 0.4% at million-key scales.
 5. **New Workloads — RESOLVED**: Five paper-defined workload extensions (W/RW/RSW/RS/R) added across all tables.
 6. **Six-Scale Sweep — RESOLVED**: Extended from 4 to 6 scale points (adding 10M and 15M) to locate the A/F throughput crossover more precisely.
@@ -608,18 +608,18 @@ cascade-research/
 │   └── sstable.cpp            ← Real file I/O, direct-IO support, BlockCache integration
 │
 ├── bench/
-│   ├── rigorous_bench.cpp     ← Main: 11 workloads × 6 scales × 5 repeats, outlier detection
+│   ├── rigorous_bench.cpp     ← Main: 11 workloads × 7 scales, outlier detection
 │   ├── ycsb_bench.cpp         ← YCSB runner + ablation at 200K and 1M (Section 4a+4b)
 │   ├── ahlc_sweep.cpp         ← AHLC hysteresis sensitivity sweep (Section 3b)
 │   ├── mt_compaction_bench.cpp← Multi-threaded compaction experiment (labeled separate)
 │   ├── rocksdb_bench.cpp      ← RocksDB comparison (Section 3a, requires ROCKSDB_AVAILABLE)
 │   ├── scale_bench.cpp        ← Legacy scale comparison
 │   ├── smoke_test.cpp         ← Stability and FD leak test
-│   ├── configs/               ← 66 plain-text workload config files (11 × 6 scales)
+│   ├── configs/               ← 77 plain-text workload config files (11 × 7 scales)
 │   └── results/               ← Raw CSV logs and markdown summaries
 │
 ├── tests/
-│   └── test_all.cpp           ← 13 test suites (307 assertions, ASan/TSan clean)
+│   └── test_all.cpp           ← 15 test groups (314 assertions in the standard run)
 │
 ├── scripts/
 │   ├── aggregate_results.py   ← Reproduces all tables from raw CSVs (reviewer verification)

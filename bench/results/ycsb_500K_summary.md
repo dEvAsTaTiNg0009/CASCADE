@@ -1,6 +1,6 @@
-### YCSB Benchmark Summary — Scale 500K (500000 ops, 5 repeats, mean ± std, Welch t-test p-value)
+### YCSB Benchmark Summary — Scale 500K (500000 ops, 5 repeats, mean ± std, paired t-test p-value)
 
-| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | Welch t p | Sig (p<0.05) |
+| Workload | Metric | Baseline (Mean ± Std) | CASCADE (Mean ± Std) | Diff (%) | Mann-Whitney U | paired t p | Sig (p<0.05) |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **A(50R/50U)** | Throughput (Kops/s) | 615.7 ± 12.2 | 569.4 ± 3.7 | -7.5% | U=0 | p=0.0001 | **Yes** |
 | | WAF | 6.46 ± 0.02 | 7.94 ± 0.01 | +22.9% | - | - | - |
