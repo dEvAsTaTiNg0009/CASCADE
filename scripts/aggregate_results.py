@@ -107,8 +107,8 @@ def student_t_two_tailed_p(t: float, df: int) -> float:
     """Exact two-tailed p-value for Student's t-distribution with df degrees of freedom.
 
     Uses the regularized incomplete beta function: p = I_x(df/2, 0.5)
-    where x = df / (df + t²).  Accurate for small df (n=3–5) unlike the
-    exact Student's t inference rather than a normal approximation.
+    where x = df / (df + t²). Accurate for small df (n=3-5), unlike a
+    normal approximation.
     """
     if df <= 0: return 1.0
     x = df / (df + t * t)

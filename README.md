@@ -243,11 +243,13 @@ All measurements come from reproducible runs writing real binary SSTables and WA
 
 ---
 
-## 🧪 8-Configuration Architectural Ablation Study
+## 🧪 8-Way Architectural Ablation Study
 
-To isolate the individual contribution of each subsystem, we evaluated all 8 combinations of $\{ \text{SkipList MemTable}, \text{Concurrent CSB}^+ \text{Tree} \} \times \{ \text{Fixed Leveled Compaction}, \text{AHLC} \} \times \{ \text{Uniform Bloom}, \text{Dual-Trigger Adaptive Bloom} \}$ on YCSB Workload A (50% Read, 50% Update) at both **200,000** and **1,000,000** operations.
+To isolate the individual contribution of each subsystem, we performed the 8-way architectural ablation across all 8 combinations of $\{ \text{SkipList MemTable}, \text{Concurrent CSB}^+ \text{Tree} \} \times \{ \text{Fixed Leveled Compaction}, \text{AHLC} \} \times \{ \text{Uniform Bloom}, \text{Dual-Trigger Adaptive Bloom} \}$ on YCSB Workload A (50% Read, 50% Update) at both **200,000** and **1,000,000** operations, with **5 repetitions per configuration**.
 
 *Command: `./cascade_bench --ablation` (5 repeats per configuration, seeds 42–46; values are mean ± std; raw per-run data: `bench/results/ablation_200K_allruns.csv` and `bench/results/ablation_1M_allruns.csv`)*
+
+The ablation shows that Bloom allocation is workload- and scale-sensitive. The Uniform policy maintains a consistently low measured false-positive rate, while the Adaptive policy exhibits higher false-positive rates in the evaluated configurations, particularly at the 1M scale. These results are retained as measured and motivate further investigation of adaptive filter allocation.
 
 ### Scale Point 1: 200,000 Operations (200K Scale)
 
@@ -277,7 +279,7 @@ To isolate the individual contribution of each subsystem, we evaluated all 8 com
 
 **Subsystem Attribution Analysis**:
 1. **AHLC Dynamic Compaction**: The primary driver of write amplification reduction. Under heavy write update traffic (Workload A), AHLC detects sustained write velocity and transitions to Hybrid/Tiering modes, reducing WAF from 233.5 to 7.6 at 200K (**-96.7%**) and from 54.0 to 17.3–20.7 at 1M (**-61.7% to -67.9%**).
-2. **Dual-Trigger Bloom Filter**: Maintains an ultra-low false positive rate (<0.11%) across all configurations while dynamically resizing filter allocations to minimize space amplification (SAF bounded between 2.70 and 4.20 at 1M).
+2. **Dual-Trigger Bloom Filter**: The measured false-positive-rate results are workload- and scale-sensitive. Uniform Bloom remains consistently low, while Adaptive Bloom is higher in the evaluated configurations, particularly at 1M; these results are retained as measured and motivate further investigation of adaptive filter allocation.
 3. **Partitioned CSB+ MemTable**: Eliminates pointer-chasing overhead in the CPU memory subsystem. When combined with AHLC, it avoids the massive write stalls observed under fixed leveling.
 
 ---
